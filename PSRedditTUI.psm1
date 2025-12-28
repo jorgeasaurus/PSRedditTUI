@@ -130,7 +130,7 @@ function Save-Favorites {
     param()
     
     try {
-        $script:Favorites | ConvertTo-Json | Set-Content $script:FavoritesFile
+        $script:Favorites | ConvertTo-Json -Depth 10 | Set-Content $script:FavoritesFile
         Write-Verbose "Favorites saved to $script:FavoritesFile"
     }
     catch {

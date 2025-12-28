@@ -227,13 +227,12 @@ function Show-RedditTUI {
         $top = [Terminal.Gui.Application]::Top
         
         # Create main container
-        $win = [Terminal.Gui.Window]@{
-            Title = "PSRedditTUI - Reddit Terminal Browser"
-            X = 0
-            Y = 0
-            Width = [Terminal.Gui.Dim]::Fill()
-            Height = [Terminal.Gui.Dim]::Fill()
-        }
+        $win = [Terminal.Gui.Window]::new("PSRedditTUI - Reddit Terminal Browser")
+        $win.X = 0
+        $win.Y = 0
+        $win.Width  = [Terminal.Gui.Dim]::Fill()
+        $win.Height = [Terminal.Gui.Dim]::Fill()
+        
         
         # Create menu bar
         $menu = [Terminal.Gui.MenuBar]::new(@(

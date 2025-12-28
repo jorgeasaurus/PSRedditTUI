@@ -104,18 +104,18 @@ function Get-Favorites {
     
     if (Test-Path $script:FavoritesFile) {
         try {
-            $loadedFavorites = Get-Content $script:FavoritesFile -Raw | ConvertFrom-Json
+            $loadedFavorites = Get-Content $script:FavoritesFile -Raw | ConvertFrom-Json -NoEnumerate
 
             if ($null -eq $loadedFavorites) {
                 $script:Favorites = @()
             }
-            elseif ($loadedFavorites -is [System.Array]) {
-                $script:Favorites = $loadedFavorites
-            }
             else {
+                # Always wrap in array to handle single-element arrays
                 $script:Favorites = @($loadedFavorites)
             }
-            return $script:Favorites
+            # Use Write-Output -NoEnumerate to prevent unwrapping
+            Write-Output -NoEnumerate $script:Favorites
+            return
         }
         catch {
             Write-Warning "Failed to load favorites: $_"
@@ -169,12 +169,12 @@ function Add-Favorite {
     $exists = $script:Favorites | Where-Object { $_.ToLower() -eq $normalizedSubreddit }
     
     if (-not $exists) {
-        $script:Favorites += $Subreddit
+        $script:Favorites += $normalizedSubreddit
         Save-Favorites
-        Write-Host "Added '$Subreddit' to favorites" -ForegroundColor Green
+        Write-Information "Added '$normalizedSubreddit' to favorites" -InformationAction Continue
     }
     else {
-        Write-Host "'$Subreddit' is already in favorites" -ForegroundColor Yellow
+        Write-Information "'$normalizedSubreddit' is already in favorites" -InformationAction Continue
     }
 }
 
@@ -202,10 +202,10 @@ function Remove-Favorite {
         $filtered = @($script:Favorites | Where-Object { $_.ToLower() -ne $normalizedSubreddit })
         $script:Favorites = $filtered
         Save-Favorites
-        Write-Host "Removed '$Subreddit' from favorites" -ForegroundColor Green
+        Write-Information "Removed '$normalizedSubreddit' from favorites" -InformationAction Continue
     }
     else {
-        Write-Host "'$Subreddit' is not in favorites" -ForegroundColor Yellow
+        Write-Information "'$normalizedSubreddit' is not in favorites" -InformationAction Continue
     }
 }
 

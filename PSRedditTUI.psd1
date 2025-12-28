@@ -3,7 +3,7 @@
     RootModule = 'PSRedditTUI.psm1'
     
     # Version number of this module.
-    ModuleVersion = '0.1.1'
+    ModuleVersion = '0.1.2'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -65,15 +65,17 @@
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
-## Version 0.1.1
-- Converted to PowerShell Gallery module format
-- Added GitHub templates (issue templates, PR template, security policy)
-- Fixed Write-Host usage for better output handling
-- Fixed case-insensitive favorites normalization
-- Improved title truncation logic for better display
-- Enhanced Terminal.Gui object initialization
-- Added dynamic User-Agent for Reddit API requests
-- Improved input validation
+## Version 0.1.2
+- Code quality improvements following PowerShell best practices
+- Removed Write-ErrorLog wrapper function (simplified to Write-Log -Level Error)
+- Removed Open-UrlInBrowser function (simplified to native Start-Process)
+- Added [CmdletBinding()] to Write-Log for proper cmdlet support
+- Added -PassThru pattern to Add-Favorite and Remove-Favorite functions
+- Fixed hardcoded version string (now uses dynamic module version)
+- Fixed subreddit validation pattern to allow dashes in names
+- Removed Write-Host usage in error handling (replaced with proper exceptions)
+- Removed module load logging noise
+- Reduced codebase by ~82 lines while improving maintainability
 '@
         }
     }

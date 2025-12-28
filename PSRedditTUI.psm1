@@ -19,6 +19,7 @@ function Write-Log {
     .PARAMETER ErrorRecord
         Optional ErrorRecord object for detailed error logging
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
@@ -87,34 +88,6 @@ function Write-Log {
     }
 }
 
-function Write-ErrorLog {
-    <#
-    .SYNOPSIS
-        Convenience function for logging errors with full context
-    .PARAMETER Message
-        The error message
-    .PARAMETER ErrorRecord
-        The ErrorRecord from catch block ($_)
-    #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Message,
-
-        [Parameter(Mandatory = $false)]
-        $ErrorRecord
-    )
-
-    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
-        Write-Log -Message $Message -Level Error -Exception $ErrorRecord.Exception -ErrorRecord $ErrorRecord
-    }
-    elseif ($ErrorRecord -is [System.Exception]) {
-        Write-Log -Message $Message -Level Error -Exception $ErrorRecord
-    }
-    else {
-        Write-Log -Message "$Message - $ErrorRecord" -Level Error
-    }
-}
-
 function Clear-PSRedditTUILog {
     <#
     .SYNOPSIS
@@ -173,10 +146,6 @@ function Set-PSRedditTUILogLevel {
 
 #endregion
 
-Write-Log -Message "PSRedditTUI module loading..." -Level Info
-Write-Log -Message "PowerShell version: $($PSVersionTable.PSVersion)" -Level Debug
-Write-Log -Message "OS: $($PSVersionTable.OS)" -Level Debug
-
 # Auto-load Terminal.Gui and NStack if installed via Install-PSRedditTUITerminalGui
 & {
     $packageDir = Join-Path $HOME ".psreddittui-packages"
@@ -197,7 +166,7 @@ Write-Log -Message "OS: $($PSVersionTable.OS)" -Level Debug
             }
         }
         catch {
-            Write-ErrorLog -Message "Failed to auto-load Terminal.Gui" -ErrorRecord $_
+            Write-Log -Message "Failed to auto-load Terminal.Gui" -Level Error -ErrorRecord $_
             Write-Warning "Failed to auto-load Terminal.Gui: $_"
         }
     } else {
@@ -308,14 +277,14 @@ function Get-RedditData {
             return $response
         }
         catch {
-            Write-ErrorLog -Message "Failed to parse JSON response from: $Url" -ErrorRecord $_
+            Write-Log -Message "Failed to parse JSON response from: $Url" -Level Error -ErrorRecord $_
             Write-Log -Message "Invalid JSON content: $preview" -Level Error
             Write-Error "Response is not valid JSON: $_"
             return $null
         }
     }
     catch {
-        Write-ErrorLog -Message "Failed to fetch Reddit data from: $Url" -ErrorRecord $_
+        Write-Log -Message "Failed to fetch Reddit data from: $Url" -Level Error -ErrorRecord $_
         Write-Error "Failed to fetch Reddit data: $_"
         return $null
     }
@@ -339,7 +308,7 @@ function Get-RedditPosts {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('^[a-zA-Z0-9_]+$')]
+        [ValidatePattern('^[a-zA-Z0-9_-]+$')]
         [string]$Subreddit,
 
         [Parameter(Mandatory = $false)]
@@ -486,7 +455,7 @@ function Search-Reddit {
         Write-Log -Message "Search URL: $url" -Level Debug
 
         # Use module version for User-Agent
-        $moduleVersion = "1.0.0"
+        $moduleVersion = $MyInvocation.MyCommand.Module.Version
         $userAgent = "PSRedditTUI/$moduleVersion"
 
         $startTime = Get-Date
@@ -519,7 +488,7 @@ function Search-Reddit {
         return @()
     }
     catch {
-        Write-ErrorLog -Message "Search failed for query: '$Query' (subreddit: $Subreddit)" -ErrorRecord $_
+        Write-Log -Message "Search failed for query: '$Query' (subreddit: $Subreddit)" -Level Error -ErrorRecord $_
         Write-Error "Failed to search Reddit: $_"
         return @()
     }
@@ -602,7 +571,7 @@ function Get-Favorites {
             return
         }
         catch {
-            Write-ErrorLog -Message "Failed to load favorites from: $script:FavoritesFile" -ErrorRecord $_
+            Write-Log -Message "Failed to load favorites from: $script:FavoritesFile" -Level Error -ErrorRecord $_
             Write-Warning "Failed to load favorites: $_"
             $script:Favorites = @()
         }
@@ -618,7 +587,7 @@ function Get-Favorites {
             Write-Verbose "First launch: Populated favorites with default subreddits"
         }
         catch {
-            Write-ErrorLog -Message "Failed to save default favorites" -ErrorRecord $_
+            Write-Log -Message "Failed to save default favorites" -Level Error -ErrorRecord $_
         }
 
         # Use Write-Output -NoEnumerate to prevent unwrapping
@@ -651,7 +620,7 @@ function Save-Favorites {
         Write-Verbose "Favorites saved to $script:FavoritesFile"
     }
     catch {
-        Write-ErrorLog -Message "Failed to save favorites to: $script:FavoritesFile" -ErrorRecord $_
+        Write-Log -Message "Failed to save favorites to: $script:FavoritesFile" -Level Error -ErrorRecord $_
         Write-Error "Failed to save favorites: $_"
     }
 }
@@ -662,11 +631,16 @@ function Add-Favorite {
         Adds a subreddit to favorites
     .PARAMETER Subreddit
         The subreddit name to add
+    .PARAMETER PassThru
+        Return an object representing the added favorite
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Subreddit
+        [string]$Subreddit,
+
+        [Parameter()]
+        [switch]$PassThru
     )
 
     Write-Log -Message "Add-Favorite called with: $Subreddit" -Level Debug
@@ -681,11 +655,25 @@ function Add-Favorite {
         $script:Favorites += $normalizedSubreddit
         Save-Favorites
         Write-Log -Message "Added '$normalizedSubreddit' to favorites" -Level Info
-        Write-Information "Added '$normalizedSubreddit' to favorites" -InformationAction Continue
+
+        if ($PassThru) {
+            [PSCustomObject]@{
+                Subreddit = $normalizedSubreddit
+                Action = 'Added'
+                Timestamp = Get-Date
+            }
+        }
     }
     else {
         Write-Log -Message "'$normalizedSubreddit' already exists in favorites" -Level Debug
-        Write-Information "'$normalizedSubreddit' is already in favorites" -InformationAction Continue
+
+        if ($PassThru) {
+            [PSCustomObject]@{
+                Subreddit = $normalizedSubreddit
+                Action = 'AlreadyExists'
+                Timestamp = Get-Date
+            }
+        }
     }
 }
 
@@ -695,11 +683,16 @@ function Remove-Favorite {
         Removes a subreddit from favorites
     .PARAMETER Subreddit
         The subreddit name to remove
+    .PARAMETER PassThru
+        Return an object representing the removed favorite
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Subreddit
+        [string]$Subreddit,
+
+        [Parameter()]
+        [switch]$PassThru
     )
 
     Write-Log -Message "Remove-Favorite called with: $Subreddit" -Level Debug
@@ -716,47 +709,31 @@ function Remove-Favorite {
         $script:Favorites = $filtered
         Save-Favorites
         Write-Log -Message "Removed '$normalizedSubreddit' from favorites" -Level Info
-        Write-Information "Removed '$normalizedSubreddit' from favorites" -InformationAction Continue
+
+        if ($PassThru) {
+            [PSCustomObject]@{
+                Subreddit = $normalizedSubreddit
+                Action = 'Removed'
+                Timestamp = Get-Date
+            }
+        }
     }
     else {
         Write-Log -Message "'$normalizedSubreddit' not found in favorites" -Level Debug
-        Write-Information "'$normalizedSubreddit' is not in favorites" -InformationAction Continue
+
+        if ($PassThru) {
+            [PSCustomObject]@{
+                Subreddit = $normalizedSubreddit
+                Action = 'NotFound'
+                Timestamp = Get-Date
+            }
+        }
     }
 }
 
 #endregion
 
 #region Helper Functions
-
-function Open-UrlInBrowser {
-    <#
-    .SYNOPSIS
-        Opens a URL in the default browser
-    .PARAMETER Url
-        The URL to open
-    #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Url
-    )
-
-    Write-Log -Message "Opening URL in browser: $Url" -Level Info
-
-    try {
-        if ($IsWindows -or $env:OS -match 'Windows') {
-            Start-Process $Url
-        } elseif ($IsMacOS) {
-            Start-Process "open" -ArgumentList $Url
-        } else {
-            Start-Process "xdg-open" -ArgumentList $Url
-        }
-        return $true
-    }
-    catch {
-        Write-ErrorLog -Message "Failed to open URL in browser: $Url" -ErrorRecord $_
-        return $false
-    }
-}
 
 #endregion
 
@@ -789,7 +766,7 @@ function Show-RedditTUI {
         Write-Log -Message "Terminal.Gui is available" -Level Debug
     }
     catch {
-        Write-ErrorLog -Message "Terminal.Gui is not available - run Install-PSRedditTUITerminalGui" -ErrorRecord $_
+        Write-Log -Message "Terminal.Gui is not available - run Install-PSRedditTUITerminalGui" -Level Error -ErrorRecord $_
         Write-Error "Terminal.Gui is not available. Run 'Install-PSRedditTUITerminalGui' to install the dependency, or manually install the Terminal.Gui .NET assembly."
         return
     }
@@ -967,7 +944,7 @@ function Show-RedditTUI {
                 Write-Log -Message "TUI: EVENT - Sort combo handler completed successfully" -Level Debug
             }
             catch {
-                Write-ErrorLog -Message "TUI: EVENT - Failed in sort combo handler" -ErrorRecord $_
+                Write-Log -Message "TUI: EVENT - Failed in sort combo handler" -Level Error -ErrorRecord $_
             }
         })
 
@@ -981,7 +958,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to change time filter" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to change time filter" -Level Error -ErrorRecord $_
             }
         })
 
@@ -1166,13 +1143,7 @@ function Show-RedditTUI {
             $openBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
             $openBtn.add_Clicked({
                 $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                if ($IsWindows -or $env:OS -match 'Windows') {
-                    Start-Process $urlToOpen
-                } elseif ($IsMacOS) {
-                    Start-Process "open" -ArgumentList $urlToOpen
-                } else {
-                    Start-Process "xdg-open" -ArgumentList $urlToOpen
-                }
+                Start-Process $urlToOpen
             }.GetNewClosure())
             $dialog.Add($openBtn)
 
@@ -1192,13 +1163,7 @@ function Show-RedditTUI {
                     $key = $keyEvent.Key.ToString()
                     if ($key -eq 'O' -or $key -eq 'o') {
                         $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                        if ($IsWindows -or $env:OS -match 'Windows') {
-                            Start-Process $urlToOpen
-                        } elseif ($IsMacOS) {
-                            Start-Process "open" -ArgumentList $urlToOpen
-                        } else {
-                            Start-Process "xdg-open" -ArgumentList $urlToOpen
-                        }
+                        Start-Process $urlToOpen
                         $keyEvent.Handled = $true
                     }
                 }
@@ -1247,7 +1212,7 @@ function Show-RedditTUI {
                     Write-Log -Message "TUI: Displayed $($comments.Count) comments" -Level Debug
                 }
                 catch {
-                    Write-ErrorLog -Message "TUI: Failed to load comments for: $($post.Permalink)" -ErrorRecord $_
+                    Write-Log -Message "TUI: Failed to load comments for: $($post.Permalink)" -Level Error -ErrorRecord $_
                     $contentView.Text = "Failed to load comments: $_"
                 }
             }
@@ -1263,7 +1228,7 @@ function Show-RedditTUI {
                 Write-Log -Message "TUI: Post detail dialog closed normally" -Level Debug
             }
             catch {
-                Write-ErrorLog -Message "TUI: CRASH - Failed to run post detail dialog" -ErrorRecord $_
+                Write-Log -Message "TUI: CRASH - Failed to run post detail dialog" -Level Error -ErrorRecord $_
                 throw
             }
         }
@@ -1302,7 +1267,7 @@ function Show-RedditTUI {
                 Write-Log -Message "TUI: Displayed $($script:CurrentPosts.Count) posts for r/$subreddit" -Level Debug
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to load r/$subreddit (sort: $sort, time: $time)" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to load r/$subreddit (sort: $sort, time: $time)" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load subreddit: $_", @("OK"))
                 $contentFrame.Title = "r/$subreddit (Error)"
             }
@@ -1346,7 +1311,7 @@ function Show-RedditTUI {
                 Write-Log -Message "TUI: Search returned $($script:CurrentPosts.Count) results" -Level Debug
             }
             catch {
-                Write-ErrorLog -Message "TUI: Search failed for '$query' (global: $globalSearch, subreddit: $subreddit)" -ErrorRecord $_
+                Write-Log -Message "TUI: Search failed for '$query' (global: $globalSearch, subreddit: $subreddit)" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Search failed: $_", @("OK"))
                 $contentFrame.Title = "Search Error"
             }
@@ -1366,7 +1331,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to search" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to search" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to search: $_", @("OK"))
             }
         })
@@ -1388,7 +1353,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: EVENT - Failed to show post detail" -ErrorRecord $_
+                Write-Log -Message "TUI: EVENT - Failed to show post detail" -Level Error -ErrorRecord $_
                 Write-Log -Message "TUI: EVENT - Showing error dialog" -Level Debug
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to open post: $_", @("OK"))
                 Write-Log -Message "TUI: EVENT - Error dialog shown" -Level Debug
@@ -1406,13 +1371,7 @@ function Show-RedditTUI {
                     if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
                         $selectedPost = $script:CurrentPosts[$selected]
                         $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
-                        if ($IsWindows -or $env:OS -match 'Windows') {
-                            Start-Process $urlToOpen
-                        } elseif ($IsMacOS) {
-                            Start-Process "open" -ArgumentList $urlToOpen
-                        } else {
-                            Start-Process "xdg-open" -ArgumentList $urlToOpen
-                        }
+                        Start-Process $urlToOpen
                         $keyEvent.Handled = $true
                     }
                 }
@@ -1429,7 +1388,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to load subreddit" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to load subreddit" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load subreddit: $_", @("OK"))
             }
         })
@@ -1446,7 +1405,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to load favorite" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to load favorite" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load favorite: $_", @("OK"))
             }
         })
@@ -1468,7 +1427,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to add favorite" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to add favorite" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to add favorite: $_", @("OK"))
             }
         })
@@ -1489,7 +1448,7 @@ function Show-RedditTUI {
                 }
             }
             catch {
-                Write-ErrorLog -Message "TUI: Failed to remove favorite" -ErrorRecord $_
+                Write-Log -Message "TUI: Failed to remove favorite" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to remove favorite: $_", @("OK"))
             }
         })
@@ -1514,14 +1473,14 @@ function Show-RedditTUI {
         }
         catch {
             Write-Log -Message "TUI: CRASH - Exception caught at Application.Run() level" -Level Error
-            Write-ErrorLog -Message "TUI: CRASH - Application.Run() threw exception" -ErrorRecord $_
+            Write-Log -Message "TUI: CRASH - Application.Run() threw exception" -Level Error -ErrorRecord $_
             throw
         }
 
         Write-Log -Message "TUI: Application main loop ended normally" -Level Debug
     }
     catch {
-        Write-ErrorLog -Message "TUI: Unhandled exception in application" -ErrorRecord $_
+        Write-Log -Message "TUI: Unhandled exception in application" -Level Error -ErrorRecord $_
         throw
     }
     finally {
@@ -1531,7 +1490,7 @@ function Show-RedditTUI {
             Write-Log -Message "TUI: Application shutdown complete" -Level Debug
         }
         catch {
-            Write-ErrorLog -Message "TUI: Error during shutdown" -ErrorRecord $_
+            Write-Log -Message "TUI: Error during shutdown" -Level Error -ErrorRecord $_
         }
     }
 }
@@ -1593,7 +1552,7 @@ function Install-PSRedditTUITerminalGui {
                         Write-Log -Message "Loaded NStack assembly from: $nstackDllPath" -Level Info
                     }
                     catch {
-                        Write-ErrorLog -Message "Failed to load existing NStack assembly" -ErrorRecord $_
+                        Write-Log -Message "Failed to load existing NStack assembly" -Level Error -ErrorRecord $_
                     }
                 }
 
@@ -1603,7 +1562,7 @@ function Install-PSRedditTUITerminalGui {
                         Write-Log -Message "Loaded Terminal.Gui assembly from: $terminalGuiDllPath" -Level Info
                     }
                     catch {
-                        Write-ErrorLog -Message "Failed to load existing Terminal.Gui assembly" -ErrorRecord $_
+                        Write-Log -Message "Failed to load existing Terminal.Gui assembly" -Level Error -ErrorRecord $_
                     }
                 }
 
@@ -1657,7 +1616,7 @@ function Install-PSRedditTUITerminalGui {
 
         if (-not $nstackDllPath -or -not (Test-Path $nstackDllPath)) {
             $errorMsg = "Could not find NStack.dll in extracted package"
-            Write-ErrorLog -Message $errorMsg -ErrorRecord $null
+            Write-Log -Message $errorMsg -Level Error
             throw $errorMsg
         }
 
@@ -1700,7 +1659,7 @@ function Install-PSRedditTUITerminalGui {
 
         if (-not $terminalGuiDllPath -or -not (Test-Path $terminalGuiDllPath)) {
             $errorMsg = "Could not find Terminal.Gui.dll in extracted package"
-            Write-ErrorLog -Message $errorMsg -ErrorRecord $null
+            Write-Log -Message $errorMsg -Level Error
             throw $errorMsg
         }
 
@@ -1743,38 +1702,12 @@ function Install-PSRedditTUITerminalGui {
         }
     }
     catch {
-        Write-ErrorLog -Message "Failed to install Terminal.Gui and NStack" -ErrorRecord $_
-
-        # Provide manual installation instructions
-        Write-Host ""
-        Write-Host "Automatic installation failed. You can install Terminal.Gui and NStack manually:" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Option 1: Using Install-Package (recommended)" -ForegroundColor Cyan
-        Write-Host "  # Install NStack.Core first (dependency)" -ForegroundColor White
-        Write-Host "  Install-Package -Name NStack.Core -ProviderName NuGet -Scope CurrentUser -RequiredVersion $NStackVersion" -ForegroundColor White
-        Write-Host "  Install-Package -Name Terminal.Gui -ProviderName NuGet -Scope CurrentUser -RequiredVersion $Version" -ForegroundColor White
-        Write-Host "  Then add the assemblies to PowerShell (NStack first):" -ForegroundColor White
-        Write-Host "  Add-Type -Path `"~/.local/share/PackageManagement/NuGet/Packages/NStack.Core.$NStackVersion/lib/netstandard2.0/NStack.dll`"" -ForegroundColor White
-        Write-Host "  Add-Type -Path `"~/.local/share/PackageManagement/NuGet/Packages/Terminal.Gui.$Version/lib/net8.0/Terminal.Gui.dll`"" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Option 2: Manual Download" -ForegroundColor Cyan
-        Write-Host "  1. Download NStack.Core: https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion" -ForegroundColor White
-        Write-Host "  2. Download Terminal.Gui: https://www.nuget.org/api/v2/package/Terminal.Gui/$Version" -ForegroundColor White
-        Write-Host "  3. Rename .nupkg files to .zip and extract to: $packageDir" -ForegroundColor White
-        Write-Host "  4. Load the DLLs (NStack first, then Terminal.Gui):" -ForegroundColor White
-        Write-Host "     Add-Type -Path `"$packageDir/NStack.Core/lib/netstandard2.0/NStack.dll`"" -ForegroundColor White
-        Write-Host "     Add-Type -Path `"$packageDir/Terminal.Gui/lib/net8.0/Terminal.Gui.dll`"" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Error details: $_" -ForegroundColor Red
-        Write-Host ""
-
-        throw
+        Write-Log -Message "Failed to install Terminal.Gui and NStack" -Level Error -ErrorRecord $_
+        throw "Failed to install Terminal.Gui: $_`n`nFor manual installation instructions, run: Get-Help Install-PSRedditTUITerminalGui -Full"
     }
 }
 
 #endregion
-
-Write-Log -Message "PSRedditTUI module loaded successfully" -Level Info
 
 # Export module members
 Export-ModuleMember -Function @(

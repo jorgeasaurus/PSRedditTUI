@@ -34,7 +34,11 @@ function Get-RedditData {
         
         Write-Verbose "Fetching data from: $Url"
         
-        $response = Invoke-RestMethod -Uri $Url -Method Get -UserAgent "PSRedditTUI/1.0"
+        # Use module version for User-Agent
+        $moduleVersion = $MyInvocation.MyCommand.Module.Version
+        $userAgent = "PSRedditTUI/$moduleVersion"
+        
+        $response = Invoke-RestMethod -Uri $Url -Method Get -UserAgent $userAgent
         return $response
     }
     catch {
@@ -57,6 +61,7 @@ function Get-RedditPosts {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[a-zA-Z0-9_]+$')]
         [string]$Subreddit,
         
         [Parameter(Mandatory = $false)]
@@ -130,7 +135,13 @@ function Save-Favorites {
     param()
     
     try {
-        $script:Favorites | ConvertTo-Json -Depth 10 | Set-Content $script:FavoritesFile
+        if ($script:Favorites.Count -eq 0) {
+            # Save empty array explicitly
+            '[]' | Set-Content $script:FavoritesFile
+        }
+        else {
+            $script:Favorites | ConvertTo-Json -Depth 10 | Set-Content $script:FavoritesFile
+        }
         Write-Verbose "Favorites saved to $script:FavoritesFile"
     }
     catch {
@@ -151,7 +162,13 @@ function Add-Favorite {
         [string]$Subreddit
     )
     
-    if ($script:Favorites -notcontains $Subreddit) {
+    # Normalize to lowercase for case-insensitive comparison
+    $normalizedSubreddit = $Subreddit.ToLower()
+    
+    # Check if already exists (case-insensitive)
+    $exists = $script:Favorites | Where-Object { $_.ToLower() -eq $normalizedSubreddit }
+    
+    if (-not $exists) {
         $script:Favorites += $Subreddit
         Save-Favorites
         Write-Host "Added '$Subreddit' to favorites" -ForegroundColor Green
@@ -174,8 +191,16 @@ function Remove-Favorite {
         [string]$Subreddit
     )
     
-    if ($script:Favorites -contains $Subreddit) {
-        $script:Favorites = $script:Favorites | Where-Object { $_ -ne $Subreddit }
+    # Normalize to lowercase for case-insensitive comparison
+    $normalizedSubreddit = $Subreddit.ToLower()
+    
+    # Check if exists (case-insensitive)
+    $exists = $script:Favorites | Where-Object { $_.ToLower() -eq $normalizedSubreddit }
+    
+    if ($exists) {
+        # Ensure we always get an array, even if empty
+        $filtered = @($script:Favorites | Where-Object { $_.ToLower() -ne $normalizedSubreddit })
+        $script:Favorites = $filtered
         Save-Favorites
         Write-Host "Removed '$Subreddit' from favorites" -ForegroundColor Green
     }
@@ -212,7 +237,7 @@ function Show-RedditTUI {
         $null = [Terminal.Gui.Application]
     }
     catch {
-        Write-Error "Terminal.Gui is not available. Please install it first using: Install-Module -Name Terminal.Gui"
+        Write-Error "Terminal.Gui is not available. Ensure the Terminal.Gui .NET assembly is installed and loaded into PowerShell (for example, by installing the Terminal.Gui NuGet package and loading the assembly)."
         return
     }
     
@@ -248,13 +273,12 @@ function Show-RedditTUI {
         $top.Add($menu)
         
         # Create favorites sidebar (left side)
-        $favoritesFrame = [Terminal.Gui.FrameView]@{
-            Title = "Favorites"
-            X = 0
-            Y = 1
-            Width = 25
-            Height = [Terminal.Gui.Dim]::Fill()
-        }
+        $favoritesFrame = [Terminal.Gui.FrameView]::new()
+        $favoritesFrame.Title = "Favorites"
+        $favoritesFrame.X = 0
+        $favoritesFrame.Y = 1
+        $favoritesFrame.Width = 25
+        $favoritesFrame.Height = [Terminal.Gui.Dim]::Fill()
         
         $favoritesList = [Terminal.Gui.ListView]::new()
         $favoritesList.X = 0
@@ -348,7 +372,9 @@ function Show-RedditTUI {
                     $comments = $post.Comments.ToString().PadLeft(4)
                     $title = $post.Title
                     if ($title.Length -gt 80) {
-                        $title = $title.Substring(0, 77) + "..."
+                        # Use substring with safe bounds checking
+                        $maxLength = [Math]::Min(77, $title.Length)
+                        $title = $title.Substring(0, $maxLength) + "..."
                     }
                     $postsList.Add("[$score ↑] [$comments 💬] $title")
                 }

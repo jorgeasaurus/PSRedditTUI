@@ -63,8 +63,8 @@ Write-Host ""
 Write-Host "Or run it directly from PowerShell:"
 Write-Host "  Show-RedditTUI" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Note: Terminal.Gui must be installed first:" -ForegroundColor Yellow
-Write-Host "  Install-Module -Name Terminal.Gui -Scope CurrentUser" -ForegroundColor Cyan
+Write-Host "Note: Terminal.Gui must be installed first (from NuGet):" -ForegroundColor Yellow
+Write-Host "  Install-Package -Name Terminal.Gui -ProviderName NuGet -Scope CurrentUser" -ForegroundColor Cyan
 Write-Host ""
 
 # Uncomment to launch the TUI:

@@ -288,24 +288,21 @@ function Show-RedditTUI {
         }
         
         # Subreddit input
-        $subredditLabel = [Terminal.Gui.Label]@{
-            Text = "Subreddit:"
-            X = 0
-            Y = 0
-        }
+        $subredditLabel = [Terminal.Gui.Label]::new()
+        $subredditLabel.Text = "Subreddit:"
+        $subredditLabel.X = 0
+        $subredditLabel.Y = 0
         
-        $subredditInput = [Terminal.Gui.TextField]@{
-            Text = $InitialSubreddit
-            X = [Terminal.Gui.Pos]::Right($subredditLabel) + 1
-            Y = 0
-            Width = 30
-        }
+        $subredditInput = [Terminal.Gui.TextField]::new()
+        $subredditInput.Text = $InitialSubreddit
+        $subredditInput.X = [Terminal.Gui.Pos]::Right($subredditLabel) + 1
+        $subredditInput.Y = 0
+        $subredditInput.Width = 30
         
-        $loadBtn = [Terminal.Gui.Button]@{
-            Text = "Load"
-            X = [Terminal.Gui.Pos]::Right($subredditInput) + 1
-            Y = 0
-        }
+        $loadBtn = [Terminal.Gui.Button]::new()
+        $loadBtn.Text = "Load"
+        $loadBtn.X = [Terminal.Gui.Pos]::Right($subredditInput) + 1
+        $loadBtn.Y = 0
         
         $contentFrame.Add($subredditLabel)
         $contentFrame.Add($subredditInput)

@@ -99,7 +99,17 @@ function Get-Favorites {
     
     if (Test-Path $script:FavoritesFile) {
         try {
-            $script:Favorites = Get-Content $script:FavoritesFile -Raw | ConvertFrom-Json
+            $loadedFavorites = Get-Content $script:FavoritesFile -Raw | ConvertFrom-Json
+
+            if ($null -eq $loadedFavorites) {
+                $script:Favorites = @()
+            }
+            elseif ($loadedFavorites -is [System.Array]) {
+                $script:Favorites = $loadedFavorites
+            }
+            else {
+                $script:Favorites = @($loadedFavorites)
+            }
             return $script:Favorites
         }
         catch {

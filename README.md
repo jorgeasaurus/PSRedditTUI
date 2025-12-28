@@ -13,15 +13,13 @@ A PowerShell module for browsing Reddit in a Terminal UI (TUI)
 ## Requirements
 
 - PowerShell Core 7.0 or higher
-- Terminal.Gui module
+- Terminal.Gui .NET library (used by this module for the TUI)
 
 ## Installation
 
-### Install Terminal.Gui dependency
+### Terminal.Gui dependency
 
-```powershell
-Install-Module -Name Terminal.Gui -Scope CurrentUser
-```
+PSRedditTUI uses the [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) .NET library for its terminal UI. The required assemblies are expected to be available with this module; you do **not** need to install a separate `Terminal.Gui` PowerShell module from the PowerShell Gallery.
 
 ### Install PSRedditTUI
 

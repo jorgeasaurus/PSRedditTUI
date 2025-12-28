@@ -273,17 +273,15 @@ function Show-RedditTUI {
         $favoritesFrame.Add($favoritesList)
         
         # Add favorite buttons
-        $addFavBtn = [Terminal.Gui.Button]@{
-            Text = "Add"
-            X = 0
-            Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-        }
+        $addFavBtn = [Terminal.Gui.Button]::new()
+        $addFavBtn.Text = "Add"
+        $addFavBtn.X = 0
+        $addFavBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
         
-        $removeFavBtn = [Terminal.Gui.Button]@{
-            Text = "Remove"
-            X = [Terminal.Gui.Pos]::Right($addFavBtn) + 1
-            Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-        }
+        $removeFavBtn = [Terminal.Gui.Button]::new()
+        $removeFavBtn.Text = "Remove"
+        $removeFavBtn.X = [Terminal.Gui.Pos]::Right($addFavBtn) + 1
+        $removeFavBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
         
         $favoritesFrame.Add($addFavBtn)
         $favoritesFrame.Add($removeFavBtn)

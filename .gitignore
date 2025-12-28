@@ -1,0 +1,30 @@
+# Ignore PowerShell module artifacts
+*.psm1.bak
+*.psd1.bak
+
+# Ignore user favorites file (for testing)
+.psreddittui_favorites.json
+
+# Ignore macOS files
+.DS_Store
+
+# Ignore Windows files
+Thumbs.db
+desktop.ini
+
+# Ignore temporary files
+*.tmp
+*.temp
+~*
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Ignore build artifacts
+bin/
+obj/
+out/

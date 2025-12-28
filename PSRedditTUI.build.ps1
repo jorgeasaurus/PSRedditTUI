@@ -18,7 +18,6 @@ $ModuleBuildPath = Join-Path -Path $BuildPath -ChildPath $ModuleName
 $ModuleFiles = @(
     'PSRedditTUI.psd1'
     'PSRedditTUI.psm1'
-    'Install-TerminalGui.ps1'  # Deprecated wrapper for Install-PSRedditTUITerminalGui (backwards compatibility)
 )
 
 # No subfolders in this module structure

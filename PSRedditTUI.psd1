@@ -3,7 +3,7 @@
     RootModule = 'PSRedditTUI.psm1'
     
     # Version number of this module.
-    ModuleVersion = '0.1.0'
+    ModuleVersion = '0.1.1'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -65,13 +65,15 @@
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
-## Version 0.1.0
-- Initial release
-- Reddit JSON API integration (appends /.json to URLs)
-- Terminal UI using Terminal.Gui (ConsoleGui)
-- Favorites sidebar for managing favorite subreddits
-- Browse subreddits with sorting options
-- PowerShell Core 7+ only
+## Version 0.1.1
+- Converted to PowerShell Gallery module format
+- Added GitHub templates (issue templates, PR template, security policy)
+- Fixed Write-Host usage for better output handling
+- Fixed case-insensitive favorites normalization
+- Improved title truncation logic for better display
+- Enhanced Terminal.Gui object initialization
+- Added dynamic User-Agent for Reddit API requests
+- Improved input validation
 '@
         }
     }

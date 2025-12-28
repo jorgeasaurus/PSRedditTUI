@@ -177,7 +177,7 @@ Write-Log -Message "PSRedditTUI module loading..." -Level Info
 Write-Log -Message "PowerShell version: $($PSVersionTable.PSVersion)" -Level Debug
 Write-Log -Message "OS: $($PSVersionTable.OS)" -Level Debug
 
-# Auto-load Terminal.Gui if installed via Install-TerminalGui.ps1
+# Auto-load Terminal.Gui and NStack if installed via Install-PSRedditTUITerminalGui
 & {
     $packageDir = Join-Path $HOME ".psreddittui-packages"
     $terminalGuiDll = Join-Path $packageDir "Terminal.Gui/lib/net8.0/Terminal.Gui.dll"
@@ -208,6 +208,21 @@ Write-Log -Message "OS: $($PSVersionTable.OS)" -Level Debug
 # Module variables
 $script:FavoritesFile = Join-Path $HOME ".psreddittui_favorites.json"
 $script:Favorites = @()
+
+# Default subreddits to populate on first launch
+$script:DefaultFavorites = @(
+    'popular',
+    'all',
+    'powershell',
+    'windows',
+    'microsoft',
+    'technology',
+    'news',
+    'gaming',
+    'lifeprotips',
+    'todayilearned',
+    'askreddit'
+)
 
 Write-Log -Message "Favorites file: $script:FavoritesFile" -Level Debug
 
@@ -560,6 +575,9 @@ function Get-Favorites {
     <#
     .SYNOPSIS
         Loads favorites from local storage
+    .DESCRIPTION
+        Loads favorites from the local JSON file. If the file doesn't exist (first launch),
+        it creates the file with a default set of popular subreddits.
     #>
     [CmdletBinding()]
     param()
@@ -589,7 +607,23 @@ function Get-Favorites {
             $script:Favorites = @()
         }
     } else {
-        Write-Log -Message "Favorites file does not exist" -Level Debug
+        # First launch - populate with default subreddits
+        Write-Log -Message "Favorites file does not exist - populating with defaults" -Level Info
+        $script:Favorites = $script:DefaultFavorites.Clone()
+
+        # Save defaults to file
+        try {
+            Save-Favorites
+            Write-Log -Message "Created favorites file with $($script:Favorites.Count) default subreddits: $($script:Favorites -join ', ')" -Level Info
+            Write-Verbose "First launch: Populated favorites with default subreddits"
+        }
+        catch {
+            Write-ErrorLog -Message "Failed to save default favorites" -ErrorRecord $_
+        }
+
+        # Use Write-Output -NoEnumerate to prevent unwrapping
+        Write-Output -NoEnumerate $script:Favorites
+        return
     }
 
     return @()
@@ -1154,17 +1188,19 @@ function Show-RedditTUI {
             $dialog.add_KeyPress({
                 param($keyEvent)
                 # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-                $key = $keyEvent.KeyCode.ToString()
-                if ($key -eq 'O' -or $key -eq 'o') {
-                    $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                    if ($IsWindows -or $env:OS -match 'Windows') {
-                        Start-Process $urlToOpen
-                    } elseif ($IsMacOS) {
-                        Start-Process "open" -ArgumentList $urlToOpen
-                    } else {
-                        Start-Process "xdg-open" -ArgumentList $urlToOpen
+                if ($null -ne $keyEvent.Key) {
+                    $key = $keyEvent.Key.ToString()
+                    if ($key -eq 'O' -or $key -eq 'o') {
+                        $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
+                        if ($IsWindows -or $env:OS -match 'Windows') {
+                            Start-Process $urlToOpen
+                        } elseif ($IsMacOS) {
+                            Start-Process "open" -ArgumentList $urlToOpen
+                        } else {
+                            Start-Process "xdg-open" -ArgumentList $urlToOpen
+                        }
+                        $keyEvent.Handled = $true
                     }
-                    $keyEvent.Handled = $true
                 }
             }.GetNewClosure())
 
@@ -1363,20 +1399,22 @@ function Show-RedditTUI {
         $postsListView.add_KeyPress({
             param($keyEvent)
             # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-            $key = $keyEvent.KeyCode.ToString()
-            if ($key -eq 'O' -or $key -eq 'o') {
-                $selected = $postsListView.SelectedItem
-                if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
-                    $selectedPost = $script:CurrentPosts[$selected]
-                    $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
-                    if ($IsWindows -or $env:OS -match 'Windows') {
-                        Start-Process $urlToOpen
-                    } elseif ($IsMacOS) {
-                        Start-Process "open" -ArgumentList $urlToOpen
-                    } else {
-                        Start-Process "xdg-open" -ArgumentList $urlToOpen
+            if ($null -ne $keyEvent.Key) {
+                $key = $keyEvent.Key.ToString()
+                if ($key -eq 'O' -or $key -eq 'o') {
+                    $selected = $postsListView.SelectedItem
+                    if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
+                        $selectedPost = $script:CurrentPosts[$selected]
+                        $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
+                        if ($IsWindows -or $env:OS -match 'Windows') {
+                            Start-Process $urlToOpen
+                        } elseif ($IsMacOS) {
+                            Start-Process "open" -ArgumentList $urlToOpen
+                        } else {
+                            Start-Process "xdg-open" -ArgumentList $urlToOpen
+                        }
+                        $keyEvent.Handled = $true
                     }
-                    $keyEvent.Handled = $true
                 }
             }
         }.GetNewClosure())
@@ -1467,11 +1505,11 @@ function Show-RedditTUI {
 
         # Run the application
         Write-Log -Message "TUI: Starting application main loop" -Level Info
-        Write-Log -Message "TUI: About to call Terminal.Gui.Application.Run()" -Level Debug
+        Write-Log -Message "TUI: About to call Terminal.Gui.Application.Run() with explicit toplevel" -Level Debug
         Write-Log -Message "TUI: Application state - Top: $($null -ne $top), Win: $($null -ne $win)" -Level Debug
 
         try {
-            [Terminal.Gui.Application]::Run()
+            [Terminal.Gui.Application]::Run($top)
             Write-Log -Message "TUI: Application.Run() returned normally" -Level Debug
         }
         catch {
@@ -1507,19 +1545,21 @@ function Install-PSRedditTUITerminalGui {
     .SYNOPSIS
         Installs Terminal.Gui dependency for PSRedditTUI
     .DESCRIPTION
-        Downloads Terminal.Gui from NuGet and extracts it to ~/.psreddittui-packages/.
+        Downloads Terminal.Gui and its NStack.Core dependency from NuGet and extracts them to ~/.psreddittui-packages/.
         Defaults to v1.16.0 which is the stable version used by Microsoft.PowerShell.ConsoleGuiTools.
         Terminal.Gui v2.x has compatibility issues with PowerShell and is not recommended.
     .PARAMETER Version
         The Terminal.Gui version to install (default: 1.16.0 - same as Microsoft.PowerShell.ConsoleGuiTools)
+    .PARAMETER NStackVersion
+        The NStack.Core version to install (default: 1.0.0 - compatible with Terminal.Gui 1.16.0)
     .PARAMETER Force
         Force reinstallation even if Terminal.Gui is already installed
     .EXAMPLE
         Install-PSRedditTUITerminalGui
-        Installs Terminal.Gui 1.16.0 to the local package directory
+        Installs Terminal.Gui 1.16.0 and NStack.Core 1.0.0 to the local package directory
     .EXAMPLE
         Install-PSRedditTUITerminalGui -Version "1.16.0" -Force
-        Forces reinstallation of Terminal.Gui 1.16.0
+        Forces reinstallation of Terminal.Gui 1.16.0 and NStack.Core
     #>
     [CmdletBinding()]
     param(
@@ -1527,25 +1567,40 @@ function Install-PSRedditTUITerminalGui {
         [string]$Version = "1.16.0",
 
         [Parameter(Mandatory = $false)]
+        [string]$NStackVersion = "1.0.0",
+
+        [Parameter(Mandatory = $false)]
         [switch]$Force
     )
 
     try {
         $packageDir = Join-Path $HOME ".psreddittui-packages"
-        $extractPath = Join-Path $packageDir "Terminal.Gui"
-        $dllPath = Join-Path $extractPath "lib/net8.0/Terminal.Gui.dll"
+        $terminalGuiExtractPath = Join-Path $packageDir "Terminal.Gui"
+        $nstackExtractPath = Join-Path $packageDir "NStack.Core"
+        $terminalGuiDllPath = Join-Path $terminalGuiExtractPath "lib/net8.0/Terminal.Gui.dll"
+        $nstackDllPath = Join-Path $nstackExtractPath "lib/netstandard2.0/NStack.dll"
 
         # Check if already installed (skip if -Force)
         if (-not $Force) {
-            if (Test-Path $dllPath) {
-                Write-Log -Message "Terminal.Gui already installed at: $dllPath" -Level Info
-                Write-Information "Terminal.Gui is already installed. Use -Force to reinstall." -InformationAction Continue
+            if ((Test-Path $terminalGuiDllPath) -and (Test-Path $nstackDllPath)) {
+                Write-Log -Message "Terminal.Gui and NStack already installed" -Level Info
+                Write-Information "Terminal.Gui and NStack are already installed. Use -Force to reinstall." -InformationAction Continue
 
-                # Try to load if not already loaded
+                # Try to load if not already loaded (NStack first, then Terminal.Gui)
+                if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
+                    try {
+                        Add-Type -Path $nstackDllPath -ErrorAction Stop
+                        Write-Log -Message "Loaded NStack assembly from: $nstackDllPath" -Level Info
+                    }
+                    catch {
+                        Write-ErrorLog -Message "Failed to load existing NStack assembly" -ErrorRecord $_
+                    }
+                }
+
                 if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
                     try {
-                        Add-Type -Path $dllPath -ErrorAction Stop
-                        Write-Log -Message "Loaded Terminal.Gui assembly from: $dllPath" -Level Info
+                        Add-Type -Path $terminalGuiDllPath -ErrorAction Stop
+                        Write-Log -Message "Loaded Terminal.Gui assembly from: $terminalGuiDllPath" -Level Info
                     }
                     catch {
                         Write-ErrorLog -Message "Failed to load existing Terminal.Gui assembly" -ErrorRecord $_
@@ -1553,10 +1608,12 @@ function Install-PSRedditTUITerminalGui {
                 }
 
                 return [PSCustomObject]@{
-                    Version = $Version
-                    InstallPath = $dllPath
+                    TerminalGuiVersion = $Version
+                    NStackVersion = $NStackVersion
+                    TerminalGuiPath = $terminalGuiDllPath
+                    NStackPath = $nstackDllPath
                     Loaded = $true
-                    Message = "Terminal.Gui already installed"
+                    Message = "Terminal.Gui and NStack already installed"
                 }
             }
         }
@@ -1565,62 +1622,111 @@ function Install-PSRedditTUITerminalGui {
         Write-Log -Message "Creating package directory: $packageDir" -Level Debug
         New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 
-        # Download Terminal.Gui nupkg
-        $nupkgUrl = "https://www.nuget.org/api/v2/package/Terminal.Gui/$Version"
-        $nupkgPath = Join-Path $packageDir "Terminal.Gui.$Version.nupkg"
+        # ===== Install NStack.Core first (dependency) =====
+        Write-Log -Message "Downloading NStack.Core $NStackVersion from NuGet..." -Level Info
+        Write-Information "Downloading NStack.Core $NStackVersion..." -InformationAction Continue
 
+        $nstackNupkgUrl = "https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion"
+        $nstackNupkgPath = Join-Path $packageDir "NStack.Core.$NStackVersion.nupkg"
+
+        Invoke-WebRequest -Uri $nstackNupkgUrl -OutFile $nstackNupkgPath -ErrorAction Stop
+        Write-Log -Message "Downloaded NStack.Core to: $nstackNupkgPath" -Level Debug
+
+        # Extract NStack package
+        Write-Log -Message "Extracting NStack.Core to: $nstackExtractPath" -Level Info
+        Write-Information "Extracting NStack.Core..." -InformationAction Continue
+
+        if (Test-Path $nstackExtractPath) {
+            Remove-Item -Path $nstackExtractPath -Recurse -Force
+        }
+
+        $nstackZipPath = $nstackNupkgPath -replace '\.nupkg$', '.zip'
+        if (Test-Path $nstackZipPath) {
+            Remove-Item -Path $nstackZipPath -Force
+        }
+        Copy-Item -Path $nstackNupkgPath -Destination $nstackZipPath -Force
+        Expand-Archive -Path $nstackZipPath -DestinationPath $nstackExtractPath -Force
+        Remove-Item -Path $nstackZipPath -Force -ErrorAction SilentlyContinue
+
+        # Find NStack.dll
+        if (-not (Test-Path $nstackDllPath)) {
+            Write-Log -Message "netstandard2.0 NStack.dll not found, searching for alternatives..." -Level Debug
+            $nstackDllPath = Get-ChildItem -Path $nstackExtractPath -Recurse -Filter "NStack.dll" |
+                             Select-Object -First 1 -ExpandProperty FullName
+        }
+
+        if (-not $nstackDllPath -or -not (Test-Path $nstackDllPath)) {
+            $errorMsg = "Could not find NStack.dll in extracted package"
+            Write-ErrorLog -Message $errorMsg -ErrorRecord $null
+            throw $errorMsg
+        }
+
+        Write-Log -Message "Found NStack.dll at: $nstackDllPath" -Level Info
+        Write-Information "NStack.Core installed successfully!" -InformationAction Continue
+
+        # ===== Install Terminal.Gui =====
         Write-Log -Message "Downloading Terminal.Gui $Version from NuGet..." -Level Info
         Write-Information "Downloading Terminal.Gui $Version..." -InformationAction Continue
 
-        Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath -ErrorAction Stop
-        Write-Log -Message "Downloaded to: $nupkgPath" -Level Debug
+        $terminalGuiNupkgUrl = "https://www.nuget.org/api/v2/package/Terminal.Gui/$Version"
+        $terminalGuiNupkgPath = Join-Path $packageDir "Terminal.Gui.$Version.nupkg"
 
-        # Extract package (rename .nupkg to .zip since Expand-Archive doesn't recognize .nupkg)
-        Write-Log -Message "Extracting package to: $extractPath" -Level Info
-        Write-Information "Extracting package..." -InformationAction Continue
+        Invoke-WebRequest -Uri $terminalGuiNupkgUrl -OutFile $terminalGuiNupkgPath -ErrorAction Stop
+        Write-Log -Message "Downloaded Terminal.Gui to: $terminalGuiNupkgPath" -Level Debug
 
-        if (Test-Path $extractPath) {
-            Remove-Item -Path $extractPath -Recurse -Force
+        # Extract Terminal.Gui package
+        Write-Log -Message "Extracting Terminal.Gui to: $terminalGuiExtractPath" -Level Info
+        Write-Information "Extracting Terminal.Gui..." -InformationAction Continue
+
+        if (Test-Path $terminalGuiExtractPath) {
+            Remove-Item -Path $terminalGuiExtractPath -Recurse -Force
         }
 
-        # Rename .nupkg to .zip for extraction
-        $zipPath = $nupkgPath -replace '\.nupkg$', '.zip'
-        if (Test-Path $zipPath) {
-            Remove-Item -Path $zipPath -Force
+        $terminalGuiZipPath = $terminalGuiNupkgPath -replace '\.nupkg$', '.zip'
+        if (Test-Path $terminalGuiZipPath) {
+            Remove-Item -Path $terminalGuiZipPath -Force
         }
-        Copy-Item -Path $nupkgPath -Destination $zipPath -Force
+        Copy-Item -Path $terminalGuiNupkgPath -Destination $terminalGuiZipPath -Force
+        Expand-Archive -Path $terminalGuiZipPath -DestinationPath $terminalGuiExtractPath -Force
+        Remove-Item -Path $terminalGuiZipPath -Force -ErrorAction SilentlyContinue
 
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-        # Clean up the .zip copy
-        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
-
-        # Find the DLL - prefer net8.0 for PowerShell 7.4+
-        if (-not (Test-Path $dllPath)) {
-            Write-Log -Message "net8.0 DLL not found, searching for alternatives..." -Level Debug
-            $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter "Terminal.Gui.dll" |
-                       Where-Object { $_.FullName -match 'net[78]' } |
-                       Select-Object -First 1 -ExpandProperty FullName
+        # Find Terminal.Gui.dll - prefer net8.0 for PowerShell 7.4+
+        if (-not (Test-Path $terminalGuiDllPath)) {
+            Write-Log -Message "net8.0 Terminal.Gui.dll not found, searching for alternatives..." -Level Debug
+            $terminalGuiDllPath = Get-ChildItem -Path $terminalGuiExtractPath -Recurse -Filter "Terminal.Gui.dll" |
+                                  Where-Object { $_.FullName -match 'net[78]' } |
+                                  Select-Object -First 1 -ExpandProperty FullName
         }
 
-        if (-not $dllPath -or -not (Test-Path $dllPath)) {
+        if (-not $terminalGuiDllPath -or -not (Test-Path $terminalGuiDllPath)) {
             $errorMsg = "Could not find Terminal.Gui.dll in extracted package"
             Write-ErrorLog -Message $errorMsg -ErrorRecord $null
             throw $errorMsg
         }
 
-        Write-Log -Message "Found Terminal.Gui.dll at: $dllPath" -Level Info
+        Write-Log -Message "Found Terminal.Gui.dll at: $terminalGuiDllPath" -Level Info
         Write-Information "Terminal.Gui installed successfully!" -InformationAction Continue
-        Write-Information "DLL path: $dllPath" -InformationAction Continue
 
-        # Load the assembly if not already loaded
+        # ===== Load assemblies (NStack first, then Terminal.Gui) =====
+        # Load NStack first (dependency)
+        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
+            Write-Log -Message "Loading NStack assembly..." -Level Info
+            Write-Information "Loading NStack assembly..." -InformationAction Continue
+            Add-Type -Path $nstackDllPath -ErrorAction Stop
+            Write-Log -Message "Successfully loaded NStack assembly" -Level Info
+            Write-Information "Loaded: $nstackDllPath" -InformationAction Continue
+        }
+        else {
+            Write-Log -Message "NStack assembly already loaded in current session" -Level Info
+        }
+
+        # Load Terminal.Gui
         if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
             Write-Log -Message "Loading Terminal.Gui assembly..." -Level Info
-            Write-Information "Loading assembly..." -InformationAction Continue
-
-            Add-Type -Path $dllPath -ErrorAction Stop
+            Write-Information "Loading Terminal.Gui assembly..." -InformationAction Continue
+            Add-Type -Path $terminalGuiDllPath -ErrorAction Stop
             Write-Log -Message "Successfully loaded Terminal.Gui assembly" -Level Info
-            Write-Information "Loaded: $dllPath" -InformationAction Continue
+            Write-Information "Loaded: $terminalGuiDllPath" -InformationAction Continue
         }
         else {
             Write-Log -Message "Terminal.Gui assembly already loaded in current session" -Level Info
@@ -1628,30 +1734,36 @@ function Install-PSRedditTUITerminalGui {
 
         # Return success information
         return [PSCustomObject]@{
-            Version = $Version
-            InstallPath = $dllPath
+            TerminalGuiVersion = $Version
+            NStackVersion = $NStackVersion
+            TerminalGuiPath = $terminalGuiDllPath
+            NStackPath = $nstackDllPath
             Loaded = $true
-            Message = "Terminal.Gui installed and loaded successfully"
+            Message = "Terminal.Gui and NStack installed and loaded successfully"
         }
     }
     catch {
-        Write-ErrorLog -Message "Failed to install Terminal.Gui" -ErrorRecord $_
+        Write-ErrorLog -Message "Failed to install Terminal.Gui and NStack" -ErrorRecord $_
 
         # Provide manual installation instructions
         Write-Host ""
-        Write-Host "Automatic installation failed. You can install Terminal.Gui manually:" -ForegroundColor Yellow
+        Write-Host "Automatic installation failed. You can install Terminal.Gui and NStack manually:" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "Option 1: Using Install-Package (recommended)" -ForegroundColor Cyan
+        Write-Host "  # Install NStack.Core first (dependency)" -ForegroundColor White
+        Write-Host "  Install-Package -Name NStack.Core -ProviderName NuGet -Scope CurrentUser -RequiredVersion $NStackVersion" -ForegroundColor White
         Write-Host "  Install-Package -Name Terminal.Gui -ProviderName NuGet -Scope CurrentUser -RequiredVersion $Version" -ForegroundColor White
-        Write-Host "  Then add the assembly to PowerShell:" -ForegroundColor White
+        Write-Host "  Then add the assemblies to PowerShell (NStack first):" -ForegroundColor White
+        Write-Host "  Add-Type -Path `"~/.local/share/PackageManagement/NuGet/Packages/NStack.Core.$NStackVersion/lib/netstandard2.0/NStack.dll`"" -ForegroundColor White
         Write-Host "  Add-Type -Path `"~/.local/share/PackageManagement/NuGet/Packages/Terminal.Gui.$Version/lib/net8.0/Terminal.Gui.dll`"" -ForegroundColor White
         Write-Host ""
         Write-Host "Option 2: Manual Download" -ForegroundColor Cyan
-        Write-Host "  1. Download: https://www.nuget.org/api/v2/package/Terminal.Gui/$Version" -ForegroundColor White
-        Write-Host "  2. Rename the .nupkg file to .zip" -ForegroundColor White
-        Write-Host "  3. Extract to: $packageDir" -ForegroundColor White
-        Write-Host "  4. Load the DLL:" -ForegroundColor White
-        Write-Host "     Add-Type -Path `"$dllPath`"" -ForegroundColor White
+        Write-Host "  1. Download NStack.Core: https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion" -ForegroundColor White
+        Write-Host "  2. Download Terminal.Gui: https://www.nuget.org/api/v2/package/Terminal.Gui/$Version" -ForegroundColor White
+        Write-Host "  3. Rename .nupkg files to .zip and extract to: $packageDir" -ForegroundColor White
+        Write-Host "  4. Load the DLLs (NStack first, then Terminal.Gui):" -ForegroundColor White
+        Write-Host "     Add-Type -Path `"$packageDir/NStack.Core/lib/netstandard2.0/NStack.dll`"" -ForegroundColor White
+        Write-Host "     Add-Type -Path `"$packageDir/Terminal.Gui/lib/net8.0/Terminal.Gui.dll`"" -ForegroundColor White
         Write-Host ""
         Write-Host "Error details: $_" -ForegroundColor Red
         Write-Host ""

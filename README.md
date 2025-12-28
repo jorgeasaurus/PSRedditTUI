@@ -36,7 +36,7 @@ Install-Module -Name PSRedditTUI -Scope CurrentUser
 
 # Import and run
 Import-Module PSRedditTUI
-Install-PSRedditTUITerminalGui  # First time only - installs Terminal.Gui dependency
+Install-PSRedditTUITerminalGui  # First time only - installs Terminal.Gui and NStack dependencies
 Show-RedditTUI
 ```
 
@@ -157,9 +157,61 @@ Example:
 - URL: `https://www.reddit.com/r/powershell/top?t=month`
 - Becomes: `https://www.reddit.com/r/powershell/top.json?t=month`
 
+## Limitations
+
+### API and Data Limitations
+
+- **Limited Posts per Request**: Reddit's JSON API returns approximately 25 posts per request by default. This is a Reddit API limitation, not a module limitation. The module displays all posts returned by Reddit in a single request.
+
+- **Limited Comments**: The `Get-RedditComments` function defaults to fetching 50 top-level comments. Deeply nested comment threads may be truncated.
+
+- **Dependency on Reddit's JSON URL Feature**: This module relies entirely on Reddit's undocumented feature of appending `.json` to URLs to fetch data. **If Reddit removes or changes this feature, the module will break.** This is an unofficial API endpoint not guaranteed by Reddit.
+
+- **No Authentication**: The module only accesses public subreddit data. Private subreddits, user-specific feeds (like your homepage), and authenticated actions (voting, posting, saving) are not supported.
+
+- **No Pagination**: The module does not currently support loading more posts beyond the initial batch returned by Reddit. Future versions may add "load more" functionality.
+
+- **Rate Limiting**: Reddit may rate-limit requests. Excessive queries in a short time may result in temporary blocks. The module does not implement retry logic or rate limit handling.
+
+### Terminal UI Limitations
+
+- **Terminal.Gui Version Lock**: The module uses Terminal.Gui v1.16.0 (the same version as Microsoft.PowerShell.ConsoleGuiTools) for stability. Terminal.Gui v2.x has compatibility issues with PowerShell.
+
+- **Key Handling**: Uses `Key` property for keyboard input. Older Terminal.Gui versions or different terminal emulators may behave differently.
+
+- **Display Constraints**: Post titles are truncated to fit terminal width. Long comments may wrap or be truncated depending on terminal size.
+
+### Platform Notes
+
+- Requires PowerShell 7.0+ (PowerShell Core). Windows PowerShell 5.1 is not supported.
+- Cross-platform, but Terminal.Gui rendering may vary across different terminal emulators.
+
 ## Favorites Storage
 
 Favorites are stored locally in `~/.psreddittui_favorites.json` and persist between sessions.
+
+### Default Favorites on First Launch
+
+When you launch PSRedditTUI for the first time, the favorites sidebar is automatically populated with **11 curated subreddits** to get you started:
+
+#### Tech-Focused Communities
+- `powershell` - PowerShell community and discussions
+- `windows` - Windows OS community
+- `microsoft` - Microsoft products and news
+- `technology` - Tech news and discussions
+
+#### General Interest
+- `popular` - Trending posts across Reddit
+- `all` - All public posts
+- `news` - Current news
+- `gaming` - Gaming community
+
+#### Community & Knowledge
+- `lifeprotips` - Life tips and advice (LPT)
+- `todayilearned` - Interesting facts (TIL)
+- `askreddit` - Community Q&A
+
+**Note:** You can add or remove any of these defaults just like any other favorite. The defaults are only created on first launch; your customized favorites will persist for all future sessions.
 
 ## Exported Functions
 
@@ -173,7 +225,7 @@ Favorites are stored locally in `~/.psreddittui_favorites.json` and persist betw
 | `Get-Favorites` | Load favorites from local storage |
 | `Add-Favorite` | Add a subreddit to favorites |
 | `Remove-Favorite` | Remove a subreddit from favorites |
-| `Install-PSRedditTUITerminalGui` | Install Terminal.Gui dependency from NuGet |
+| `Install-PSRedditTUITerminalGui` | Install Terminal.Gui and NStack.Core dependencies from NuGet |
 | `Get-PSRedditTUILog` | View log entries |
 | `Set-PSRedditTUILogLevel` | Set logging verbosity |
 | `Clear-PSRedditTUILog` | Clear the log file |
@@ -196,18 +248,18 @@ Favorites are stored locally in `~/.psreddittui_favorites.json` and persist betw
 
 ## Troubleshooting
 
-### Terminal.Gui not found
+### Terminal.Gui or NStack not found
 
-Run the installer function:
+Run the installer function to download both Terminal.Gui and its NStack.Core dependency:
 
 ```powershell
 Install-PSRedditTUITerminalGui
 ```
 
-Or use the deprecated script (for backwards compatibility):
+To force reinstallation:
 
 ```powershell
-./Install-TerminalGui.ps1
+Install-PSRedditTUITerminalGui -Force
 ```
 
 ### PowerShell version

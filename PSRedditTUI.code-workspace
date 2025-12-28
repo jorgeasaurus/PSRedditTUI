@@ -1,0 +1,22 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"terminal.integrated.defaultProfile.windows": "Windows PowerShell",
+		"terminal.integrated.profiles.windows": {
+			"Windows PowerShell": {
+				"source": "PowerShell",
+				"path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+				"args": ["-NoLogo"],
+				"icon": "terminal-powershell"
+			}
+		},
+		"powershell.powerShellDefaultVersion": "Windows PowerShell (x64)",
+		"files.associations": {
+			"*.ps1": "powershell"
+		}
+	}
+}

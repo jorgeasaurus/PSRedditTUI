@@ -18,7 +18,6 @@ desktop.ini
 ~*
 
 # Ignore IDE files
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -28,3 +27,8 @@ desktop.ini
 bin/
 obj/
 out/
+build/
+
+#Ignore LLM files
+.claude
+

@@ -3,7 +3,7 @@
     RootModule = 'PSRedditTUI.psm1'
     
     # Version number of this module.
-    ModuleVersion = '1.0.0'
+    ModuleVersion = '0.1.0'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -12,13 +12,13 @@
     GUID = 'a8f7e3d2-1b4c-4d6e-9f2a-7c8b5e3d1a0f'
     
     # Author of this module
-    Author = 'Jorge'
+    Author = 'Jorgeasaurus'
     
     # Company or vendor of this module
-    CompanyName = 'Unknown'
+    CompanyName = 'Jorgeasaurus'
     
     # Copyright statement for this module
-    Copyright = '(c) 2025. All rights reserved.'
+    Copyright = '(c) 2025 Jorgeasaurus. All rights reserved.'
     
     # Description of the functionality provided by this module
     Description = 'A PowerShell module for browsing Reddit in a Terminal UI using ConsoleGui tools. Features include subreddit browsing, favorites management, and JSON API integration.'
@@ -30,10 +30,16 @@
     FunctionsToExport = @(
         'Get-RedditData',
         'Get-RedditPosts',
+        'Get-RedditComments',
+        'Search-Reddit',
         'Get-Favorites',
         'Add-Favorite',
         'Remove-Favorite',
-        'Show-RedditTUI'
+        'Show-RedditTUI',
+        'Get-PSRedditTUILog',
+        'Clear-PSRedditTUILog',
+        'Set-PSRedditTUILogLevel',
+        'Install-PSRedditTUITerminalGui'
     )
     
     # Cmdlets to export from this module
@@ -59,7 +65,7 @@
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
-## Version 1.0.0
+## Version 0.1.0
 - Initial release
 - Reddit JSON API integration (appends /.json to URLs)
 - Terminal UI using Terminal.Gui (ConsoleGui)

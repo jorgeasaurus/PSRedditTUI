@@ -372,9 +372,8 @@ function Show-RedditTUI {
                     $comments = $post.Comments.ToString().PadLeft(4)
                     $title = $post.Title
                     if ($title.Length -gt 80) {
-                        # Use substring with safe bounds checking
-                        $maxLength = [Math]::Min(77, $title.Length)
-                        $title = $title.Substring(0, $maxLength) + "..."
+                        # Truncate to 77 characters and add ellipsis
+                        $title = $title.Substring(0, 77) + "..."
                     }
                     $postsList.Add("[$score ↑] [$comments 💬] $title")
                 }

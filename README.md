@@ -56,7 +56,7 @@ Show-RedditTUI -InitialSubreddit "powershell"
 - **Arrow Keys**: Navigate through posts and favorites
 - **Enter**: Select a subreddit from favorites
 - **Tab**: Switch between UI elements
-- **Ctrl+Q** or **ESC**: Quit the application
+- **Ctrl+Q**: Quit the application
 - **F1**: Show help dialog
 
 ### Managing Favorites

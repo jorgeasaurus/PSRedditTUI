@@ -287,13 +287,12 @@ function Show-RedditTUI {
         $favoritesFrame.Add($removeFavBtn)
         
         # Create main content area (right side)
-        $contentFrame = [Terminal.Gui.FrameView]@{
-            Title = "r/$InitialSubreddit"
-            X = 25
-            Y = 1
-            Width = [Terminal.Gui.Dim]::Fill()
-            Height = [Terminal.Gui.Dim]::Fill(2)
-        }
+        $contentFrame = [Terminal.Gui.FrameView]::new()
+        $contentFrame.Title  = "r/$InitialSubreddit"
+        $contentFrame.X      = 25
+        $contentFrame.Y      = 1
+        $contentFrame.Width  = [Terminal.Gui.Dim]::Fill()
+        $contentFrame.Height = [Terminal.Gui.Dim]::Fill(2)
         
         # Subreddit input
         $subredditLabel = [Terminal.Gui.Label]::new()

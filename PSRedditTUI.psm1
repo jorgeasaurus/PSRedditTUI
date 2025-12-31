@@ -1003,7 +1003,7 @@ function Show-Comments {
             continue
         }
 
-        $indent = "  " * $comment.Depth
+        $indent = "  " * $CurrentDepth
         $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
         $scoreColor = if ($comment.Score -ge 0) { "green" } else { "red" }
 

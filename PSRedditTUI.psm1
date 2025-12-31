@@ -747,21 +747,21 @@ function Show-RedditTUI {
     # Load favorites
     Get-Favorites | Out-Null
 
-    # Initialize state
-    $script:CurrentSubreddit = $InitialSubreddit
-    $script:CurrentSort = "hot"
-    $script:CurrentTime = "day"
-    $script:CurrentPosts = @()
-    $script:Running = $true
+    # Initialize state - use local variables instead of script scope
+    $currentSubreddit = $InitialSubreddit
+    $currentSort = "hot"
+    $currentTime = "day"
+    $currentPosts = @()
+    $running = $true
 
     Write-SpectreHost "`n[bold cyan]PSRedditTUI - Reddit Terminal Browser[/]`n" -NoNewline
 
     # Main loop
-    while ($script:Running) {
+    while ($running) {
         try {
             # Show main menu
             $mainChoice = Read-SpectreSelection -Title "[bold yellow]Main Menu[/]" -Choices @(
-                "📖 Browse Subreddit: r/$($script:CurrentSubreddit)",
+                "📖 Browse Subreddit: r/$currentSubreddit",
                 "⭐ Manage Favorites",
                 "🔍 Search Reddit",
                 "⚙️  Settings",
@@ -770,19 +770,298 @@ function Show-RedditTUI {
 
             switch -Wildcard ($mainChoice) {
                 "📖 Browse*" {
-                    Show-BrowseSubredditMenu
+                    # Browse subreddit inline
+                    $browseBack = $false
+                    while (-not $browseBack) {
+                        $browseChoice = Read-SpectreSelection -Title "[bold yellow]Browse r/$currentSubreddit[/]" -Choices @(
+                            "📋 View Posts (Sort: $currentSort$(if ($currentSort -eq 'top') { "/$currentTime" }))",
+                            "🔄 Change Subreddit",
+                            "📊 Change Sort",
+                            "⬅️  Back to Main Menu"
+                        ) -Color "Cyan"
+
+                        switch -Wildcard ($browseChoice) {
+                            "📋 View Posts*" {
+                                # Load and display posts inline
+                                Write-SpectreHost "`n[yellow]Loading posts from r/$currentSubreddit...[/]`n"
+                                $currentPosts = Get-RedditPosts -Subreddit $currentSubreddit -Sort $currentSort -Time $currentTime
+
+                                if ($currentPosts.Count -eq 0) {
+                                    Write-SpectreHost "[yellow]No posts found.[/]`n"
+                                } else {
+                                    # Create simple menu without duplicate table display
+                                    $postChoices = for ($i = 0; $i -lt [Math]::Min($currentPosts.Count, 25); $i++) {
+                                        $post = $currentPosts[$i]
+                                        $title = if ($post.Title.Length -gt 70) { $post.Title.Substring(0, 67) + "..." } else { $post.Title }
+                                        "[$i] ⬆$($post.Score) 💬$($post.NumComments) │ $title"
+                                    }
+                                    $postChoices += "⬅️  Back"
+
+                                    $postSelection = Read-SpectreSelection -Title "[bold yellow]Select a post (Showing $([Math]::Min($currentPosts.Count, 25)) of $($currentPosts.Count))[/]" -Choices $postChoices -Color "Cyan"
+
+                                    if ($postSelection -match '^\[(\d+)\]') {
+                                        $postIndex = [int]$matches[1]
+                                        $selectedPost = $currentPosts[$postIndex]
+
+                                        # Display post detail inline
+                                        $headerText = @"
+[bold cyan]r/$($selectedPost.Subreddit)[/] │ [green]u/$($selectedPost.Author)[/]
+⬆ [yellow]$($selectedPost.Score)[/] │ 💬 [magenta]$($selectedPost.NumComments)[/] comments │ [dim]$($selectedPost.Created)[/]
+"@
+                                        $titlePanel = Format-SpectrePanel -Data "[bold white]$($selectedPost.Title)[/]" -Header "Post Details" -Border Rounded -Color Cyan
+                                        Write-SpectreHost $titlePanel
+                                        $headerPanel = Format-SpectrePanel -Data $headerText -Border Rounded -Color Green
+                                        Write-SpectreHost $headerPanel
+
+                                        if (-not [string]::IsNullOrWhiteSpace($selectedPost.SelfText)) {
+                                            $contentPanel = Format-SpectrePanel -Data $selectedPost.SelfText -Header "Content" -Border Rounded -Color Yellow
+                                            Write-SpectreHost $contentPanel
+                                        } elseif ($selectedPost.IsLink) {
+                                            $linkPanel = Format-SpectrePanel -Data "[link]$($selectedPost.LinkUrl)[/]" -Header "Link" -Border Rounded -Color Blue
+                                            Write-SpectreHost $linkPanel
+                                        }
+
+                                        # Load comments
+                                        Write-SpectreHost "`n[yellow]Loading comments...[/]`n"
+                                        $comments = Get-RedditComments -Permalink $selectedPost.Permalink -Limit 25
+
+                                        if ($comments.Count -gt 0) {
+                                            Write-SpectreHost "[bold cyan]Comments ($($comments.Count) loaded):[/]`n"
+                                            # Display comments inline with recursion
+                                            function Show-CommentThread {
+                                                param($Comments, $MaxDepth = 3, $CurrentDepth = 0)
+                                                foreach ($comment in $Comments) {
+                                                    if ($CurrentDepth -ge $MaxDepth) { continue }
+                                                    $indent = "  " * $CurrentDepth
+                                                    $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
+                                                    $scoreColor = if ($comment.Score -ge 0) { "green" } else { "red" }
+                                                    Write-SpectreHost "$indent[bold $scoreColor]⬆ $($comment.Score)[/] [cyan]u/$($comment.Author)[/]$opTag"
+                                                    $bodyLines = $comment.Body -split "`n"
+                                                    foreach ($line in $bodyLines) {
+                                                        Write-SpectreHost "$indent  [white]$line[/]"
+                                                    }
+                                                    Write-SpectreHost ""
+                                                    if ($comment.Replies.Count -gt 0) {
+                                                        Show-CommentThread -Comments $comment.Replies -MaxDepth $MaxDepth -CurrentDepth ($CurrentDepth + 1)
+                                                    }
+                                                }
+                                            }
+                                            Show-CommentThread -Comments $comments
+                                        } else {
+                                            Write-SpectreHost "[yellow]No comments yet.[/]`n"
+                                        }
+
+                                        # Action menu
+                                        $action = Read-SpectreSelection -Title "Actions" -Choices @("🌐 Open in Browser", "⬅️  Back to Posts") -Color "Cyan"
+                                        if ($action -match "🌐 Open") {
+                                            $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
+                                            Start-Process $urlToOpen
+                                            Write-SpectreHost "[green]Opened in browser![/]`n"
+                                        }
+                                    }
+                                }
+                            }
+                            "🔄 Change Subreddit*" {
+                                $newSub = Read-SpectreText -Prompt "Enter subreddit name" -DefaultAnswer $currentSubreddit
+                                if (-not [string]::IsNullOrWhiteSpace($newSub)) {
+                                    $currentSubreddit = $newSub -replace '^r/', ''
+                                    Write-Log -Message "Changed subreddit to: $currentSubreddit" -Level Info
+                                }
+                            }
+                            "📊 Change Sort*" {
+                                $currentSort = Read-SpectreSelection -Title "Select Sort Order" -Choices @("hot", "new", "top", "rising") -Color "Green"
+                                if ($currentSort -eq "top") {
+                                    $currentTime = Read-SpectreSelection -Title "Select Time Filter" -Choices @("hour", "day", "week", "month", "year", "all") -Color "Green"
+                                }
+                                Write-Log -Message "Changed sort to: $currentSort$(if ($currentSort -eq 'top') { "/$currentTime" })" -Level Info
+                            }
+                            "⬅️  Back*" {
+                                $browseBack = $true
+                            }
+                        }
+                    }
                 }
                 "⭐ Manage*" {
-                    Show-FavoritesMenu
+                    # Manage favorites inline
+                    $favBack = $false
+                    while (-not $favBack) {
+                        Get-Favorites | Out-Null
+                        $favChoices = @()
+                        if ($script:Favorites.Count -gt 0) {
+                            $favChoices += "📋 View/Select Favorite"
+                            $favChoices += "➕ Add New Favorite"
+                            $favChoices += "➖ Remove Favorite"
+                        } else {
+                            $favChoices += "➕ Add New Favorite"
+                        }
+                        $favChoices += "⬅️  Back to Main Menu"
+
+                        $favChoice = Read-SpectreSelection -Title "[bold yellow]Favorites Management[/]" -Choices $favChoices -Color "Cyan"
+
+                        switch -Wildcard ($favChoice) {
+                            "📋 View*" {
+                                $favList = $script:Favorites | ForEach-Object { "r/$_" }
+                                $favList += "⬅️  Back"
+                                $selected = Read-SpectreSelection -Title "Select a favorite subreddit" -Choices $favList -Color "Green"
+                                if ($selected -notmatch "⬅️") {
+                                    $currentSubreddit = $selected -replace '^r/', ''
+                                    Write-SpectreHost "[green]Switched to r/$currentSubreddit[/]`n"
+                                    $favBack = $true
+                                }
+                            }
+                            "➕ Add*" {
+                                $newFav = Read-SpectreText -Prompt "Enter subreddit name to add"
+                                if (-not [string]::IsNullOrWhiteSpace($newFav)) {
+                                    Add-Favorite -Subreddit $newFav
+                                    Write-SpectreHost "[green]Added r/$($newFav -replace '^r/', '') to favorites![/]`n"
+                                }
+                            }
+                            "➖ Remove*" {
+                                if ($script:Favorites.Count -gt 0) {
+                                    $favList = $script:Favorites | ForEach-Object { "r/$_" }
+                                    $favList += "⬅️  Cancel"
+                                    $selected = Read-SpectreSelection -Title "Select favorite to remove" -Choices $favList -Color "Red"
+                                    if ($selected -notmatch "⬅️" -and $selected -notmatch "Cancel") {
+                                        $toRemove = $selected -replace '^r/', ''
+                                        Remove-Favorite -Subreddit $toRemove
+                                        Write-SpectreHost "[green]Removed r/$toRemove from favorites![/]`n"
+                                    }
+                                }
+                            }
+                            "⬅️  Back*" {
+                                $favBack = $true
+                            }
+                        }
+                    }
                 }
                 "🔍 Search*" {
-                    Show-SearchMenu
+                    # Search inline
+                    $query = Read-SpectreText -Prompt "Enter search query"
+                    if (-not [string]::IsNullOrWhiteSpace($query)) {
+                        $scope = Read-SpectreSelection -Title "Search Scope" -Choices @(
+                            "Current Subreddit (r/$currentSubreddit)",
+                            "All of Reddit"
+                        ) -Color "Cyan"
+
+                        Write-SpectreHost "`n[yellow]Searching...[/]`n"
+                        $results = if ($scope -match "Current") {
+                            Search-Reddit -Query $query -Subreddit $currentSubreddit
+                        } else {
+                            Search-Reddit -Query $query
+                        }
+
+                        if ($results.Count -eq 0) {
+                            Write-SpectreHost "[yellow]No results found.[/]`n"
+                        } else {
+                            # Display search results using same post display logic
+                            $resultChoices = for ($i = 0; $i -lt [Math]::Min($results.Count, 25); $i++) {
+                                $result = $results[$i]
+                                $title = if ($result.Title.Length -gt 60) { $result.Title.Substring(0, 57) + "..." } else { $result.Title }
+                                "[$i] ⬆$($result.Score) r/$($result.Subreddit) │ $title"
+                            }
+                            $resultChoices += "⬅️  Back"
+
+                            $resultSelection = Read-SpectreSelection -Title "[bold yellow]Search Results (Showing $([Math]::Min($results.Count, 25)) of $($results.Count))[/]" -Choices $resultChoices -Color "Cyan"
+
+                            if ($resultSelection -match '^\[(\d+)\]') {
+                                $resultIndex = [int]$matches[1]
+                                $selectedPost = $results[$resultIndex]
+
+                                # Reuse post display logic (same as browse section)
+                                $headerText = @"
+[bold cyan]r/$($selectedPost.Subreddit)[/] │ [green]u/$($selectedPost.Author)[/]
+⬆ [yellow]$($selectedPost.Score)[/] │ 💬 [magenta]$($selectedPost.NumComments)[/] comments │ [dim]$($selectedPost.Created)[/]
+"@
+                                $titlePanel = Format-SpectrePanel -Data "[bold white]$($selectedPost.Title)[/]" -Header "Post Details" -Border Rounded -Color Cyan
+                                Write-SpectreHost $titlePanel
+                                $headerPanel = Format-SpectrePanel -Data $headerText -Border Rounded -Color Green
+                                Write-SpectreHost $headerPanel
+
+                                if (-not [string]::IsNullOrWhiteSpace($selectedPost.SelfText)) {
+                                    $contentPanel = Format-SpectrePanel -Data $selectedPost.SelfText -Header "Content" -Border Rounded -Color Yellow
+                                    Write-SpectreHost $contentPanel
+                                } elseif ($selectedPost.IsLink) {
+                                    $linkPanel = Format-SpectrePanel -Data "[link]$($selectedPost.LinkUrl)[/]" -Header "Link" -Border Rounded -Color Blue
+                                    Write-SpectreHost $linkPanel
+                                }
+
+                                Write-SpectreHost "`n[yellow]Loading comments...[/]`n"
+                                $comments = Get-RedditComments -Permalink $selectedPost.Permalink -Limit 25
+
+                                if ($comments.Count -gt 0) {
+                                    Write-SpectreHost "[bold cyan]Comments ($($comments.Count) loaded):[/]`n"
+                                    function Show-CommentThread {
+                                        param($Comments, $MaxDepth = 3, $CurrentDepth = 0)
+                                        foreach ($comment in $Comments) {
+                                            if ($CurrentDepth -ge $MaxDepth) { continue }
+                                            $indent = "  " * $CurrentDepth
+                                            $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
+                                            $scoreColor = if ($comment.Score -ge 0) { "green" } else { "red" }
+                                            Write-SpectreHost "$indent[bold $scoreColor]⬆ $($comment.Score)[/] [cyan]u/$($comment.Author)[/]$opTag"
+                                            $bodyLines = $comment.Body -split "`n"
+                                            foreach ($line in $bodyLines) {
+                                                Write-SpectreHost "$indent  [white]$line[/]"
+                                            }
+                                            Write-SpectreHost ""
+                                            if ($comment.Replies.Count -gt 0) {
+                                                Show-CommentThread -Comments $comment.Replies -MaxDepth $MaxDepth -CurrentDepth ($CurrentDepth + 1)
+                                            }
+                                        }
+                                    }
+                                    Show-CommentThread -Comments $comments
+                                } else {
+                                    Write-SpectreHost "[yellow]No comments yet.[/]`n"
+                                }
+
+                                $action = Read-SpectreSelection -Title "Actions" -Choices @("🌐 Open in Browser", "⬅️  Back to Results") -Color "Cyan"
+                                if ($action -match "🌐 Open") {
+                                    $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
+                                    Start-Process $urlToOpen
+                                    Write-SpectreHost "[green]Opened in browser![/]`n"
+                                }
+                            }
+                        }
+                    }
                 }
                 "⚙️  Settings*" {
-                    Show-SettingsMenu
+                    # Settings inline
+                    $settingsBack = $false
+                    while (-not $settingsBack) {
+                        $settingsChoice = Read-SpectreSelection -Title "[bold yellow]Settings[/]" -Choices @(
+                            "📊 View Logs",
+                            "🗑️  Clear Logs",
+                            "🔧 Set Log Level (Current: $script:LogLevel)",
+                            "⬅️  Back to Main Menu"
+                        ) -Color "Cyan"
+
+                        switch -Wildcard ($settingsChoice) {
+                            "📊 View Logs*" {
+                                $logLines = Get-PSRedditTUILog -Tail 50
+                                if ($logLines) {
+                                    $logPanel = Format-SpectrePanel -Data ($logLines -join "`n") -Header "Recent Log Entries (Last 50)" -Border Rounded -Color Yellow
+                                    Write-SpectreHost $logPanel
+                                    Read-SpectrePause -Message "Press any key to continue"
+                                } else {
+                                    Write-SpectreHost "[yellow]No log entries found.[/]`n"
+                                }
+                            }
+                            "🗑️  Clear Logs*" {
+                                Clear-PSRedditTUILog
+                                Write-SpectreHost "[green]Logs cleared![/]`n"
+                            }
+                            "🔧 Set Log Level*" {
+                                $level = Read-SpectreSelection -Title "Select Log Level" -Choices @("Debug", "Info", "Warning", "Error") -Color "Green"
+                                Set-PSRedditTUILogLevel -Level $level
+                                Write-SpectreHost "[green]Log level set to: $level[/]`n"
+                            }
+                            "⬅️  Back*" {
+                                $settingsBack = $true
+                            }
+                        }
+                    }
                 }
                 "❌ Exit*" {
-                    $script:Running = $false
+                    $running = $false
                     Write-SpectreHost "`n[green]Thanks for using PSRedditTUI! 👋[/]`n"
                 }
             }
@@ -790,447 +1069,10 @@ function Show-RedditTUI {
         catch {
             Write-Log -Message "Error in main menu loop" -Level Error -ErrorRecord $_
             Write-SpectreHost "`n[red]Error: $_[/]`n"
-            Start-Sleep -Seconds 2
         }
     }
 
     Write-Log -Message "Show-RedditTUI exiting normally" -Level Info
-}
-
-function Show-BrowseSubredditMenu {
-    <#
-    .SYNOPSIS
-        Shows the browse subreddit submenu
-    #>
-    [CmdletBinding()]
-    param()
-
-    $back = $false
-    while (-not $back) {
-        try {
-            $choices = @(
-                "📋 View Posts (Sort: $($script:CurrentSort)$(if ($script:CurrentSort -eq 'top') { "/$($script:CurrentTime)" }))",
-                "🔄 Change Subreddit",
-                "📊 Change Sort",
-                "⬅️  Back to Main Menu"
-            )
-
-            $choice = Read-SpectreSelection -Title "[bold yellow]Browse r/$($script:CurrentSubreddit)[/]" -Choices $choices -Color "Cyan"
-
-            switch -Wildcard ($choice) {
-                "📋 View Posts*" {
-                    Show-PostsList
-                }
-                "🔄 Change Subreddit*" {
-                    $newSub = Read-SpectreText -Prompt "Enter subreddit name" -DefaultAnswer $script:CurrentSubreddit
-                    if (-not [string]::IsNullOrWhiteSpace($newSub)) {
-                        $script:CurrentSubreddit = $newSub -replace '^r/', ''
-                        Write-Log -Message "Changed subreddit to: $($script:CurrentSubreddit)" -Level Info
-                    }
-                }
-                "📊 Change Sort*" {
-                    $sortChoice = Read-SpectreSelection -Title "Select Sort Order" -Choices @("hot", "new", "top", "rising") -Color "Green"
-                    $script:CurrentSort = $sortChoice
-                    
-                    if ($sortChoice -eq "top") {
-                        $timeChoice = Read-SpectreSelection -Title "Select Time Filter" -Choices @("hour", "day", "week", "month", "year", "all") -Color "Green"
-                        $script:CurrentTime = $timeChoice
-                    }
-                    
-                    Write-Log -Message "Changed sort to: $($script:CurrentSort)$(if ($script:CurrentSort -eq 'top') { "/$($script:CurrentTime)" })" -Level Info
-                }
-                "⬅️  Back*" {
-                    $back = $true
-                }
-            }
-        }
-        catch {
-            Write-Log -Message "Error in browse menu" -Level Error -ErrorRecord $_
-            Write-SpectreHost "`n[red]Error: $_[/]`n"
-            Start-Sleep -Seconds 2
-        }
-    }
-}
-
-function Show-PostsList {
-    <#
-    .SYNOPSIS
-        Shows the list of posts for the current subreddit
-    #>
-    [CmdletBinding()]
-    param()
-
-    Write-SpectreHost "`n[yellow]Loading posts from r/$($script:CurrentSubreddit)...[/]`n"
-
-    try {
-        $script:CurrentPosts = Get-RedditPosts -Subreddit $script:CurrentSubreddit -Sort $script:CurrentSort -Time $script:CurrentTime
-
-        if ($script:CurrentPosts.Count -eq 0) {
-            Write-SpectreHost "[yellow]No posts found.[/]`n"
-            Start-Sleep -Seconds 2
-            return
-        }
-
-        # Create table for display
-        $table = Format-SpectreTable -Data $script:CurrentPosts -Property @(
-            @{Label = "Score"; Expression = { "⬆ $($_.Score)" }},
-            @{Label = "Comments"; Expression = { "💬 $($_.NumComments)" }},
-            @{Label = "Title"; Expression = { 
-                if ($_.Title.Length -gt 70) {
-                    $_.Title.Substring(0, 67) + "..."
-                } else {
-                    $_.Title
-                }
-            }},
-            @{Label = "Author"; Expression = { "u/$($_.Author)" }}
-        ) -Border Rounded -Color Cyan
-
-        Write-SpectreHost $table
-
-        # Create menu choices from posts
-        $postChoices = for ($i = 0; $i -lt [Math]::Min($script:CurrentPosts.Count, 20); $i++) {
-            $post = $script:CurrentPosts[$i]
-            $title = if ($post.Title.Length -gt 60) {
-                $post.Title.Substring(0, 57) + "..."
-            } else {
-                $post.Title
-            }
-            "[$i] $title"
-        }
-        $postChoices += "⬅️  Back"
-
-        $selection = Read-SpectreSelection -Title "[bold yellow]Select a post to view (Showing top $([Math]::Min($script:CurrentPosts.Count, 20)))[/]" -Choices $postChoices -Color "Cyan"
-
-        if ($selection -notmatch "⬅️") {
-            # Extract index from selection
-            if ($selection -match '^\[(\d+)\]') {
-                $index = [int]$matches[1]
-                Show-PostDetail -Post $script:CurrentPosts[$index]
-            }
-        }
-    }
-    catch {
-        Write-Log -Message "Error loading posts" -Level Error -ErrorRecord $_
-        Write-SpectreHost "`n[red]Failed to load posts: $_[/]`n"
-        Start-Sleep -Seconds 2
-    }
-}
-
-function Show-PostDetail {
-    <#
-    .SYNOPSIS
-        Shows detailed view of a post with comments
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        $Post
-    )
-
-    try {
-        # Create post header panel
-        $headerText = @"
-[bold cyan]r/$($Post.Subreddit)[/] │ [green]u/$($Post.Author)[/]
-⬆ [yellow]$($Post.Score)[/] │ 💬 [magenta]$($Post.NumComments)[/] comments
-[dim]Posted: $($Post.Created)[/]
-"@
-
-        $titlePanel = Format-SpectrePanel -Data "[bold white]$($Post.Title)[/]" -Header "Post Details" -Border Rounded -Color Cyan
-        Write-SpectreHost $titlePanel
-
-        $headerPanel = Format-SpectrePanel -Data $headerText -Border Rounded -Color Green
-        Write-SpectreHost $headerPanel
-
-        # Show content if available
-        if (-not [string]::IsNullOrWhiteSpace($Post.SelfText)) {
-            $contentPanel = Format-SpectrePanel -Data $Post.SelfText -Header "Content" -Border Rounded -Color Yellow
-            Write-SpectreHost $contentPanel
-        } elseif ($Post.IsLink) {
-            $linkPanel = Format-SpectrePanel -Data "[link]$($Post.LinkUrl)[/]" -Header "Link" -Border Rounded -Color Blue
-            Write-SpectreHost $linkPanel
-        }
-
-        # Load and show comments
-        Write-SpectreHost "`n[yellow]Loading comments...[/]`n"
-        $comments = Get-RedditComments -Permalink $Post.Permalink -Limit 25
-
-        if ($comments.Count -gt 0) {
-            Write-SpectreHost "[bold cyan]Comments ($($comments.Count) loaded):[/]`n"
-            Show-Comments -Comments $comments -MaxDepth 3
-        } else {
-            Write-SpectreHost "[yellow]No comments yet.[/]`n"
-        }
-
-        # Action menu
-        $action = Read-SpectreSelection -Title "Actions" -Choices @(
-            "🌐 Open in Browser",
-            "⬅️  Back to Posts"
-        ) -Color "Cyan"
-
-        if ($action -match "🌐 Open") {
-            $urlToOpen = if ($Post.IsLink) { $Post.LinkUrl } else { $Post.Url }
-            Start-Process $urlToOpen
-            Write-SpectreHost "[green]Opened in browser![/]`n"
-            Start-Sleep -Seconds 1
-        }
-    }
-    catch {
-        Write-Log -Message "Error showing post detail" -Level Error -ErrorRecord $_
-        Write-SpectreHost "`n[red]Failed to load post: $_[/]`n"
-        Start-Sleep -Seconds 2
-    }
-}
-
-function Show-Comments {
-    <#
-    .SYNOPSIS
-        Recursively displays comments with proper indentation
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        $Comments,
-
-        [Parameter(Mandatory = $false)]
-        [int]$MaxDepth = 3,
-
-        [Parameter(Mandatory = $false)]
-        [int]$CurrentDepth = 0
-    )
-
-    foreach ($comment in $Comments) {
-        if ($CurrentDepth -ge $MaxDepth) {
-            continue
-        }
-
-        $indent = "  " * $CurrentDepth
-        $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
-        $scoreColor = if ($comment.Score -ge 0) { "green" } else { "red" }
-
-        # Author line
-        Write-SpectreHost "$indent[bold $scoreColor]⬆ $($comment.Score)[/] [cyan]u/$($comment.Author)[/]$opTag"
-
-        # Body
-        $bodyLines = $comment.Body -split "`n"
-        foreach ($line in $bodyLines) {
-            Write-SpectreHost "$indent  [white]$line[/]"
-        }
-        Write-SpectreHost ""
-
-        # Show replies
-        if ($comment.Replies.Count -gt 0) {
-            Show-Comments -Comments $comment.Replies -MaxDepth $MaxDepth -CurrentDepth ($CurrentDepth + 1)
-        }
-    }
-}
-
-function Show-FavoritesMenu {
-    <#
-    .SYNOPSIS
-        Shows the favorites management menu
-    #>
-    [CmdletBinding()]
-    param()
-
-    $back = $false
-    while (-not $back) {
-        try {
-            # Reload favorites
-            Get-Favorites | Out-Null
-
-            $choices = @()
-            if ($script:Favorites.Count -gt 0) {
-                $choices += "📋 View/Select Favorite"
-                $choices += "➕ Add New Favorite"
-                $choices += "➖ Remove Favorite"
-            } else {
-                $choices += "➕ Add New Favorite"
-            }
-            $choices += "⬅️  Back to Main Menu"
-
-            $choice = Read-SpectreSelection -Title "[bold yellow]Favorites Management[/]" -Choices $choices -Color "Cyan"
-
-            switch -Wildcard ($choice) {
-                "📋 View*" {
-                    $favChoices = $script:Favorites | ForEach-Object { "r/$_" }
-                    $favChoices += "⬅️  Back"
-                    
-                    $selected = Read-SpectreSelection -Title "Select a favorite subreddit" -Choices $favChoices -Color "Green"
-                    
-                    if ($selected -notmatch "⬅️") {
-                        $script:CurrentSubreddit = $selected -replace '^r/', ''
-                        Write-SpectreHost "[green]Switched to r/$($script:CurrentSubreddit)[/]`n"
-                        Start-Sleep -Seconds 1
-                        $back = $true
-                    }
-                }
-                "➕ Add*" {
-                    $newFav = Read-SpectreText -Prompt "Enter subreddit name to add"
-                    if (-not [string]::IsNullOrWhiteSpace($newFav)) {
-                        Add-Favorite -Subreddit $newFav
-                        Write-SpectreHost "[green]Added r/$($newFav -replace '^r/', '') to favorites![/]`n"
-                        Start-Sleep -Seconds 1
-                    }
-                }
-                "➖ Remove*" {
-                    if ($script:Favorites.Count -gt 0) {
-                        $favChoices = $script:Favorites | ForEach-Object { "r/$_" }
-                        $favChoices += "⬅️  Cancel"
-                        
-                        $selected = Read-SpectreSelection -Title "Select favorite to remove" -Choices $favChoices -Color "Red"
-                        
-                        if ($selected -notmatch "⬅️" -and $selected -notmatch "Cancel") {
-                            $toRemove = $selected -replace '^r/', ''
-                            Remove-Favorite -Subreddit $toRemove
-                            Write-SpectreHost "[green]Removed r/$toRemove from favorites![/]`n"
-                            Start-Sleep -Seconds 1
-                        }
-                    }
-                }
-                "⬅️  Back*" {
-                    $back = $true
-                }
-            }
-        }
-        catch {
-            Write-Log -Message "Error in favorites menu" -Level Error -ErrorRecord $_
-            Write-SpectreHost "`n[red]Error: $_[/]`n"
-            Start-Sleep -Seconds 2
-        }
-    }
-}
-
-function Show-SearchMenu {
-    <#
-    .SYNOPSIS
-        Shows the search menu
-    #>
-    [CmdletBinding()]
-    param()
-
-    try {
-        $query = Read-SpectreText -Prompt "Enter search query"
-        
-        if ([string]::IsNullOrWhiteSpace($query)) {
-            return
-        }
-
-        $scope = Read-SpectreSelection -Title "Search Scope" -Choices @(
-            "Current Subreddit (r/$($script:CurrentSubreddit))",
-            "All of Reddit"
-        ) -Color "Cyan"
-
-        Write-SpectreHost "`n[yellow]Searching...[/]`n"
-
-        if ($scope -match "Current") {
-            $results = Search-Reddit -Query $query -Subreddit $script:CurrentSubreddit
-        } else {
-            $results = Search-Reddit -Query $query
-        }
-
-        if ($results.Count -eq 0) {
-            Write-SpectreHost "[yellow]No results found.[/]`n"
-            Start-Sleep -Seconds 2
-            return
-        }
-
-        # Show results in table
-        $table = Format-SpectreTable -Data $results -Property @(
-            @{Label = "Score"; Expression = { "⬆ $($_.Score)" }},
-            @{Label = "Sub"; Expression = { "r/$($_.Subreddit)" }},
-            @{Label = "Title"; Expression = { 
-                if ($_.Title.Length -gt 50) {
-                    $_.Title.Substring(0, 47) + "..."
-                } else {
-                    $_.Title
-                }
-            }}
-        ) -Border Rounded -Color Cyan
-
-        Write-SpectreHost $table
-
-        # Create menu choices from results
-        $resultChoices = for ($i = 0; $i -lt [Math]::Min($results.Count, 15); $i++) {
-            $result = $results[$i]
-            $title = if ($result.Title.Length -gt 50) {
-                $result.Title.Substring(0, 47) + "..."
-            } else {
-                $result.Title
-            }
-            "[$i] r/$($result.Subreddit) - $title"
-        }
-        $resultChoices += "⬅️  Back"
-
-        $selection = Read-SpectreSelection -Title "[bold yellow]Search Results (Showing top $([Math]::Min($results.Count, 15)))[/]" -Choices $resultChoices -Color "Cyan"
-
-        if ($selection -notmatch "⬅️") {
-            if ($selection -match '^\[(\d+)\]') {
-                $index = [int]$matches[1]
-                Show-PostDetail -Post $results[$index]
-            }
-        }
-    }
-    catch {
-        Write-Log -Message "Error in search" -Level Error -ErrorRecord $_
-        Write-SpectreHost "`n[red]Search failed: $_[/]`n"
-        Start-Sleep -Seconds 2
-    }
-}
-
-function Show-SettingsMenu {
-    <#
-    .SYNOPSIS
-        Shows the settings menu
-    #>
-    [CmdletBinding()]
-    param()
-
-    $back = $false
-    while (-not $back) {
-        try {
-            $choices = @(
-                "📊 View Logs",
-                "🗑️  Clear Logs",
-                "🔧 Set Log Level (Current: $script:LogLevel)",
-                "⬅️  Back to Main Menu"
-            )
-
-            $choice = Read-SpectreSelection -Title "[bold yellow]Settings[/]" -Choices $choices -Color "Cyan"
-
-            switch -Wildcard ($choice) {
-                "📊 View Logs*" {
-                    $logLines = Get-PSRedditTUILog -Tail 50
-                    if ($logLines) {
-                        $logPanel = Format-SpectrePanel -Data ($logLines -join "`n") -Header "Recent Log Entries (Last 50)" -Border Rounded -Color Yellow
-                        Write-SpectreHost $logPanel
-                        Read-SpectrePause -Message "Press any key to continue"
-                    } else {
-                        Write-SpectreHost "[yellow]No log entries found.[/]`n"
-                        Start-Sleep -Seconds 2
-                    }
-                }
-                "🗑️  Clear Logs*" {
-                    Clear-PSRedditTUILog
-                    Write-SpectreHost "[green]Logs cleared![/]`n"
-                    Start-Sleep -Seconds 1
-                }
-                "🔧 Set Log Level*" {
-                    $level = Read-SpectreSelection -Title "Select Log Level" -Choices @("Debug", "Info", "Warning", "Error") -Color "Green"
-                    Set-PSRedditTUILogLevel -Level $level
-                    Write-SpectreHost "[green]Log level set to: $level[/]`n"
-                    Start-Sleep -Seconds 1
-                }
-                "⬅️  Back*" {
-                    $back = $true
-                }
-            }
-        }
-        catch {
-            Write-Log -Message "Error in settings menu" -Level Error -ErrorRecord $_
-            Write-SpectreHost "`n[red]Error: $_[/]`n"
-            Start-Sleep -Seconds 2
-        }
-    }
 }
 
 #endregion

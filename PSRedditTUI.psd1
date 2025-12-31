@@ -26,11 +26,6 @@
     # Minimum version of the PowerShell engine required by this module
     PowerShellVersion = '7.0'
     
-    # Modules that must be imported into the global environment prior to importing this module
-    RequiredModules = @(
-        @{ModuleName = 'PwshSpectreConsole'; ModuleVersion = '2.0.0'}
-    )
-    
     # Functions to export from this module
     FunctionsToExport = @(
         'Get-RedditData',

@@ -51,8 +51,7 @@ Describe 'PSRedditTUI Module' {
                 'Remove-Favorite',
                 'Get-PSRedditTUILog',
                 'Clear-PSRedditTUILog',
-                'Set-PSRedditTUILogLevel',
-                'Install-PSRedditTUITerminalGui'
+                'Set-PSRedditTUILogLevel'
             )
             foreach ($func in $expectedFunctions) {
                 $module.ExportedFunctions.Keys | Should -Contain $func
@@ -165,31 +164,5 @@ Describe 'Show-RedditTUI' {
     It 'Should have InitialSubreddit parameter' {
         $cmd = Get-Command -Name Show-RedditTUI -Module PSRedditTUI
         $cmd.Parameters.Keys | Should -Contain 'InitialSubreddit'
-    }
-}
-
-Describe 'Install-PSRedditTUITerminalGui' {
-    It 'Should exist as a function' {
-        Get-Command -Name Install-PSRedditTUITerminalGui -Module PSRedditTUI | Should -Not -BeNullOrEmpty
-    }
-
-    It 'Should be exported by the module' {
-        $module = Get-Module PSRedditTUI
-        $module.ExportedFunctions.Keys | Should -Contain 'Install-PSRedditTUITerminalGui'
-    }
-
-    It 'Should have Version parameter' {
-        $cmd = Get-Command -Name Install-PSRedditTUITerminalGui -Module PSRedditTUI
-        $cmd.Parameters.Keys | Should -Contain 'Version'
-    }
-
-    It 'Should have Force parameter' {
-        $cmd = Get-Command -Name Install-PSRedditTUITerminalGui -Module PSRedditTUI
-        $cmd.Parameters.Keys | Should -Contain 'Force'
-    }
-
-    It 'Should have CmdletBinding attribute' {
-        $cmd = Get-Command -Name Install-PSRedditTUITerminalGui -Module PSRedditTUI
-        $cmd.CmdletBinding | Should -Be $true
     }
 }

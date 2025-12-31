@@ -3,7 +3,7 @@
     RootModule = 'PSRedditTUI.psm1'
     
     # Version number of this module.
-    ModuleVersion = '0.1.2'
+    ModuleVersion = '0.2.0'
     
     # Supported PSEditions
     CompatiblePSEditions = @('Core')
@@ -21,10 +21,15 @@
     Copyright = '(c) 2025 Jorgeasaurus. All rights reserved.'
     
     # Description of the functionality provided by this module
-    Description = 'A PowerShell module for browsing Reddit in a Terminal UI using ConsoleGui tools. Features include subreddit browsing, favorites management, and JSON API integration.'
+    Description = 'A PowerShell module for browsing Reddit in a Terminal UI using Spectre.Console. Features include subreddit browsing, favorites management, and JSON API integration.'
     
     # Minimum version of the PowerShell engine required by this module
     PowerShellVersion = '7.0'
+    
+    # Modules that must be imported into the global environment prior to importing this module
+    RequiredModules = @(
+        @{ModuleName = 'PwshSpectreConsole'; ModuleVersion = '2.0.0'}
+    )
     
     # Functions to export from this module
     FunctionsToExport = @(
@@ -38,8 +43,7 @@
         'Show-RedditTUI',
         'Get-PSRedditTUILog',
         'Clear-PSRedditTUILog',
-        'Set-PSRedditTUILogLevel',
-        'Install-PSRedditTUITerminalGui'
+        'Set-PSRedditTUILogLevel'
     )
     
     # Cmdlets to export from this module
@@ -65,17 +69,13 @@
             
             # ReleaseNotes of this module
             ReleaseNotes = @'
-## Version 0.1.2
-- Code quality improvements following PowerShell best practices
-- Removed Write-ErrorLog wrapper function (simplified to Write-Log -Level Error)
-- Removed Open-UrlInBrowser function (simplified to native Start-Process)
-- Added [CmdletBinding()] to Write-Log for proper cmdlet support
-- Added -PassThru pattern to Add-Favorite and Remove-Favorite functions
-- Fixed hardcoded version string (now uses dynamic module version)
-- Fixed subreddit validation pattern to allow dashes in names
-- Removed Write-Host usage in error handling (replaced with proper exceptions)
-- Removed module load logging noise
-- Reduced codebase by ~82 lines while improving maintainability
+## Version 0.2.0
+- Complete rewrite to use PwshSpectreConsole instead of Terminal.Gui
+- All function names remain the same for backward compatibility
+- Enhanced UI with Spectre.Console features (tables, panels, selections)
+- Removed Install-PSRedditTUITerminalGui (no longer needed)
+- Simplified dependency management
+- Improved user experience with rich console output
 '@
         }
     }

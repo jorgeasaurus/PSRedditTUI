@@ -146,34 +146,6 @@ function Set-PSRedditTUILogLevel {
 
 #endregion
 
-# Auto-load Terminal.Gui and NStack if installed via Install-PSRedditTUITerminalGui
-& {
-    $packageDir = Join-Path $HOME ".psreddittui-packages"
-    $terminalGuiDll = Join-Path $packageDir "Terminal.Gui/lib/net8.0/Terminal.Gui.dll"
-    $nstackDll = Join-Path $packageDir "NStack.Core/lib/netstandard2.0/NStack.dll"
-
-    Write-Log -Message "Checking for Terminal.Gui at: $terminalGuiDll" -Level Debug
-
-    if ((Test-Path $nstackDll) -and (Test-Path $terminalGuiDll)) {
-        try {
-            if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
-                Add-Type -Path $nstackDll
-                Write-Log -Message "Loaded NStack from: $nstackDll" -Level Debug
-            }
-            if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
-                Add-Type -Path $terminalGuiDll
-                Write-Log -Message "Loaded Terminal.Gui from: $terminalGuiDll" -Level Info
-            }
-        }
-        catch {
-            Write-Log -Message "Failed to auto-load Terminal.Gui" -Level Error -ErrorRecord $_
-            Write-Warning "Failed to auto-load Terminal.Gui: $_"
-        }
-    } else {
-        Write-Log -Message "Terminal.Gui not found at expected path" -Level Warning
-    }
-}
-
 # Module variables
 $script:FavoritesFile = Join-Path $HOME ".psreddittui_favorites.json"
 $script:Favorites = @()
@@ -744,7 +716,7 @@ function Show-RedditTUI {
     .SYNOPSIS
         Launches the Terminal UI for browsing Reddit
     .DESCRIPTION
-        Opens an interactive Terminal UI using Terminal.Gui for browsing Reddit with a favorites sidebar
+        Opens an interactive Terminal UI using Spectre.Console for browsing Reddit with a menu-based interface
     .PARAMETER InitialSubreddit
         The subreddit to load initially (default: "popular")
     .EXAMPLE
@@ -760,950 +732,504 @@ function Show-RedditTUI {
     
     Write-Log -Message "Show-RedditTUI starting with initial subreddit: $InitialSubreddit" -Level Info
 
-    # Check if Terminal.Gui is available
-    try {
-        $null = [Terminal.Gui.Application]
-        Write-Log -Message "Terminal.Gui is available" -Level Debug
-    }
-    catch {
-        Write-Log -Message "Terminal.Gui is not available - run Install-PSRedditTUITerminalGui" -Level Error -ErrorRecord $_
-        Write-Error "Terminal.Gui is not available. Run 'Install-PSRedditTUITerminalGui' to install the dependency, or manually install the Terminal.Gui .NET assembly."
+    # Check if PwshSpectreConsole is available
+    if (-not (Get-Module -Name PwshSpectreConsole -ListAvailable)) {
+        Write-Log -Message "PwshSpectreConsole module not found" -Level Error
+        Write-Error "PwshSpectreConsole module is required. Install it with: Install-Module PwshSpectreConsole -Scope CurrentUser"
         return
+    }
+
+    # Import module if not already loaded
+    if (-not (Get-Module -Name PwshSpectreConsole)) {
+        Import-Module PwshSpectreConsole
     }
 
     # Load favorites
     Get-Favorites | Out-Null
 
-    # Initialize Terminal.Gui
-    Write-Log -Message "Initializing Terminal.Gui Application" -Level Debug
-    [Terminal.Gui.Application]::Init()
-
-    try {
-        # Create main window
-        $top = [Terminal.Gui.Application]::Top
-        
-        # Create main container
-        $win = [Terminal.Gui.Window]::new("PSRedditTUI - Reddit Terminal Browser")
-        $win.X = 0
-        $win.Y = 0
-        $win.Width  = [Terminal.Gui.Dim]::Fill()
-        $win.Height = [Terminal.Gui.Dim]::Fill()
-        
-        
-        # Create menu bar
-        $menu = [Terminal.Gui.MenuBar]::new(@(
-            [Terminal.Gui.MenuBarItem]::new("_File", @(
-                [Terminal.Gui.MenuItem]::new("_Quit", "Exit application", { [Terminal.Gui.Application]::RequestStop() })
-            )),
-            [Terminal.Gui.MenuBarItem]::new("_Help", @(
-                [Terminal.Gui.MenuItem]::new("_About", "About PSRedditTUI", {
-                    [Terminal.Gui.MessageBox]::Query("About", "PSRedditTUI v1.0`nA PowerShell Reddit Terminal Browser`nPress ESC to close", @("OK"))
-                })
-            ))
-        ))
-        $top.Add($menu)
-        
-        # Create favorites sidebar (left side)
-        $favoritesFrame = [Terminal.Gui.FrameView]::new()
-        $favoritesFrame.Title = "Favorites"
-        $favoritesFrame.X = 0
-        $favoritesFrame.Y = 1
-        $favoritesFrame.Width = 25
-        $favoritesFrame.Height = [Terminal.Gui.Dim]::Fill()
-        
-        $favoritesList = [Terminal.Gui.ListView]::new()
-        $favoritesList.X = 0
-        $favoritesList.Y = 0
-        $favoritesList.Width = [Terminal.Gui.Dim]::Fill()
-        $favoritesList.Height = [Terminal.Gui.Dim]::Fill(2)
-        
-        # Populate favorites list
-        $favoritesSource = [System.Collections.Generic.List[string]]::new()
-        foreach ($fav in $script:Favorites) {
-            $favoritesSource.Add("r/$fav")
-        }
-        $favoritesList.SetSource($favoritesSource)
-        
-        $favoritesFrame.Add($favoritesList)
-        
-        # Add favorite buttons
-        $addFavBtn = [Terminal.Gui.Button]::new()
-        $addFavBtn.Text = "Add"
-        $addFavBtn.X = 0
-        $addFavBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-        
-        $removeFavBtn = [Terminal.Gui.Button]::new()
-        $removeFavBtn.Text = "Remove"
-        $removeFavBtn.X = [Terminal.Gui.Pos]::Right($addFavBtn) + 1
-        $removeFavBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-        
-        $favoritesFrame.Add($addFavBtn)
-        $favoritesFrame.Add($removeFavBtn)
-        
-        # Create main content area (right side)
-        $contentFrame = [Terminal.Gui.FrameView]::new()
-        $contentFrame.Title  = "r/$InitialSubreddit"
-        $contentFrame.X      = 25
-        $contentFrame.Y      = 1
-        $contentFrame.Width  = [Terminal.Gui.Dim]::Fill()
-        $contentFrame.Height = [Terminal.Gui.Dim]::Fill()
-        
-        # Subreddit input (Row 0)
-        $subredditLabel = [Terminal.Gui.Label]::new()
-        $subredditLabel.Text = "Subreddit:"
-        $subredditLabel.X = 0
-        $subredditLabel.Y = 0
-
-        $subredditInput = [Terminal.Gui.TextField]::new()
-        $subredditInput.Text = $InitialSubreddit
-        $subredditInput.X = [Terminal.Gui.Pos]::Right($subredditLabel) + 1
-        $subredditInput.Y = 0
-        $subredditInput.Width = 20
-
-        $loadBtn = [Terminal.Gui.Button]::new()
-        $loadBtn.Text = "Load"
-        $loadBtn.X = [Terminal.Gui.Pos]::Right($subredditInput) + 1
-        $loadBtn.Y = 0
-
-        $contentFrame.Add($subredditLabel)
-        $contentFrame.Add($subredditInput)
-        $contentFrame.Add($loadBtn)
-
-        # Sort and Time Filter (Row 1)
-        $sortLabel = [Terminal.Gui.Label]::new()
-        $sortLabel.Text = "Sort:"
-        $sortLabel.X = 0
-        $sortLabel.Y = 1
-
-        # Sort options
-        $sortOptions = [System.Collections.Generic.List[string]]::new()
-        @("hot", "new", "top", "rising") | ForEach-Object { $sortOptions.Add($_) }
-
-        $sortCombo = [Terminal.Gui.ComboBox]::new()
-        $sortCombo.X = [Terminal.Gui.Pos]::Right($sortLabel) + 1
-        $sortCombo.Y = 1
-        $sortCombo.Width = 10
-        $sortCombo.Height = 5
-        $sortCombo.SetSource($sortOptions)
-        $sortCombo.SelectedItem = 0  # Default to "hot"
-
-        # Time filter label
-        $timeLabel = [Terminal.Gui.Label]::new()
-        $timeLabel.Text = "Time:"
-        $timeLabel.X = [Terminal.Gui.Pos]::Right($sortCombo) + 2
-        $timeLabel.Y = 1
-        $timeLabel.Visible = $false  # Only visible when sort=top
-
-        # Time filter options
-        $timeOptions = [System.Collections.Generic.List[string]]::new()
-        @("day", "week", "month", "year", "all") | ForEach-Object { $timeOptions.Add($_) }
-
-        $timeCombo = [Terminal.Gui.ComboBox]::new()
-        $timeCombo.X = [Terminal.Gui.Pos]::Right($timeLabel) + 1
-        $timeCombo.Y = 1
-        $timeCombo.Width = 10
-        $timeCombo.Height = 5
-        $timeCombo.SetSource($timeOptions)
-        $timeCombo.SelectedItem = 0  # Default to "day"
-        $timeCombo.Visible = $false  # Only visible when sort=top
-
-        # Track current sort/time
-        $script:CurrentSort = "hot"
-        $script:CurrentTime = "day"
-
-        # Sort combo selection changed
-        $sortCombo.add_SelectedItemChanged({
-            Write-Log -Message "TUI: EVENT - Sort combo SelectedItemChanged triggered" -Level Debug
-            try {
-                if ($null -eq $sortCombo) {
-                    Write-Log -Message "TUI: EVENT - sortCombo is null, returning" -Level Warning
-                    return
-                }
-                $selectedIdx = $sortCombo.SelectedItem
-                Write-Log -Message "TUI: EVENT - Sort selected index: $selectedIdx" -Level Debug
-                if ($selectedIdx -ge 0 -and $selectedIdx -lt $sortOptions.Count) {
-                    $script:CurrentSort = $sortOptions[$selectedIdx]
-                    Write-Log -Message "TUI: Sort changed to: $($script:CurrentSort)" -Level Debug
-
-                    # Show/hide time filter based on sort type
-                    $showTime = ($script:CurrentSort -eq "top")
-                    Write-Log -Message "TUI: EVENT - Setting time filter visibility: $showTime" -Level Debug
-                    if ($null -ne $timeLabel) {
-                        $timeLabel.Visible = $showTime
-                        Write-Log -Message "TUI: EVENT - timeLabel.Visible set to $showTime" -Level Debug
-                    } else {
-                        Write-Log -Message "TUI: EVENT - timeLabel is null" -Level Warning
-                    }
-                    if ($null -ne $timeCombo) {
-                        $timeCombo.Visible = $showTime
-                        Write-Log -Message "TUI: EVENT - timeCombo.Visible set to $showTime" -Level Debug
-                    } else {
-                        Write-Log -Message "TUI: EVENT - timeCombo is null" -Level Warning
-                    }
-                }
-                Write-Log -Message "TUI: EVENT - Sort combo handler completed successfully" -Level Debug
-            }
-            catch {
-                Write-Log -Message "TUI: EVENT - Failed in sort combo handler" -Level Error -ErrorRecord $_
-            }
-        })
-
-        # Time combo selection changed
-        $timeCombo.add_SelectedItemChanged({
-            try {
-                $selectedIdx = $timeCombo.SelectedItem
-                if ($selectedIdx -ge 0 -and $selectedIdx -lt $timeOptions.Count) {
-                    $script:CurrentTime = $timeOptions[$selectedIdx]
-                    Write-Log -Message "TUI: Time filter changed to: $($script:CurrentTime)" -Level Debug
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to change time filter" -Level Error -ErrorRecord $_
-            }
-        })
-
-        $contentFrame.Add($sortLabel)
-        $contentFrame.Add($sortCombo)
-        $contentFrame.Add($timeLabel)
-        $contentFrame.Add($timeCombo)
-
-        # Search row (Row 2)
-        $searchLabel = [Terminal.Gui.Label]::new()
-        $searchLabel.Text = "Search:"
-        $searchLabel.X = 0
-        $searchLabel.Y = 2
-
-        $searchInput = [Terminal.Gui.TextField]::new()
-        $searchInput.X = [Terminal.Gui.Pos]::Right($searchLabel) + 1
-        $searchInput.Y = 2
-        $searchInput.Width = 30
-
-        $searchBtn = [Terminal.Gui.Button]::new()
-        $searchBtn.Text = "Search"
-        $searchBtn.X = [Terminal.Gui.Pos]::Right($searchInput) + 1
-        $searchBtn.Y = 2
-
-        $searchGlobalCheck = [Terminal.Gui.CheckBox]::new()
-        $searchGlobalCheck.Text = "All Reddit"
-        $searchGlobalCheck.X = [Terminal.Gui.Pos]::Right($searchBtn) + 1
-        $searchGlobalCheck.Y = 2
-
-        $contentFrame.Add($searchLabel)
-        $contentFrame.Add($searchInput)
-        $contentFrame.Add($searchBtn)
-        $contentFrame.Add($searchGlobalCheck)
-
-        # Posts list view (moved to Y=4 for search row)
-        $postsListView = [Terminal.Gui.ListView]::new()
-        $postsListView.X = 0
-        $postsListView.Y = 4
-        $postsListView.Width = [Terminal.Gui.Dim]::Fill()
-        $postsListView.Height = [Terminal.Gui.Dim]::Fill()
-
-        $contentFrame.Add($postsListView)
-
-        # Store current posts for click handling
-        $script:CurrentPosts = @()
-        $script:IsSearchResults = $false
-
-        # Function to format comments with indentation
-        $formatComments = {
-            param($comments, $maxDepth = 3)
-
-            $lines = [System.Collections.Generic.List[string]]::new()
-
-            $processComment = {
-                param($comment, $currentDepth)
-
-                if ($currentDepth -gt $maxDepth) { return }
-
-                $indent = "  " * $comment.Depth
-                $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
-                $scoreStr = if ($comment.Score -ge 0) { "+$($comment.Score)" } else { "$($comment.Score)" }
-
-                # Author line
-                $lines.Add("$indent⬆$scoreStr 👤 u/$($comment.Author)$opTag")
-
-                # Body - wrap long lines
-                $bodyLines = $comment.Body -split "`n"
-                foreach ($bodyLine in $bodyLines) {
-                    # Wrap at ~70 chars accounting for indent
-                    $maxLen = 70 - ($comment.Depth * 2)
-                    if ($maxLen -lt 30) { $maxLen = 30 }
-
-                    if ($bodyLine.Length -gt $maxLen) {
-                        $words = $bodyLine -split ' '
-                        $currentLine = "$indent  "
-                        foreach ($word in $words) {
-                            if (($currentLine.Length + $word.Length + 1) -gt ($maxLen + $indent.Length + 2)) {
-                                $lines.Add($currentLine.TrimEnd())
-                                $currentLine = "$indent  $word "
-                            } else {
-                                $currentLine += "$word "
-                            }
-                        }
-                        if ($currentLine.Trim().Length -gt 0) {
-                            $lines.Add($currentLine.TrimEnd())
-                        }
-                    } else {
-                        $lines.Add("$indent  $bodyLine")
-                    }
-                }
-                $lines.Add("")  # Blank line after comment
-
-                # Process replies
-                foreach ($reply in $comment.Replies) {
-                    & $processComment $reply ($currentDepth + 1)
-                }
-            }
-
-            foreach ($comment in $comments) {
-                & $processComment $comment 0
-            }
-
-            return $lines
-        }
-
-        # Function to show post details dialog
-        $showPostDetail = {
-            param($post)
-
-            Write-Log -Message "TUI: Opening post detail for: $($post.Title)" -Level Info
-
-            # Create dialog
-            $dialog = [Terminal.Gui.Dialog]::new()
-            $dialog.Title = "Post Details (ESC to close)"
-            $dialog.Width = [Terminal.Gui.Dim]::Percent(90)
-            $dialog.Height = [Terminal.Gui.Dim]::Percent(90)
-
-            # Post header info
-            $headerText = "📍 r/$($post.Subreddit) │ 👤 u/$($post.Author) │ ⬆ $($post.Score) │ 💬 $($post.NumComments)"
-            $headerLabel = [Terminal.Gui.Label]::new()
-            $headerLabel.Text = $headerText
-            $headerLabel.X = 1
-            $headerLabel.Y = 0
-            $headerLabel.Width = [Terminal.Gui.Dim]::Fill()
-            $dialog.Add($headerLabel)
-
-            # Title
-            $titleLabel = [Terminal.Gui.Label]::new()
-            $titleLabel.Text = $post.Title
-            $titleLabel.X = 1
-            $titleLabel.Y = 1
-            $titleLabel.Width = [Terminal.Gui.Dim]::Fill()
-            $dialog.Add($titleLabel)
-
-            # Separator
-            $sepLabel = [Terminal.Gui.Label]::new()
-            $sepLabel.Text = ("-" * 80)
-            $sepLabel.X = 1
-            $sepLabel.Y = 2
-            $dialog.Add($sepLabel)
-
-            # Content area - TextView for scrolling
-            $contentView = [Terminal.Gui.TextView]::new()
-            $contentView.X = 1
-            $contentView.Y = 3
-            $contentView.Width = [Terminal.Gui.Dim]::Fill(1)
-            $contentView.Height = [Terminal.Gui.Dim]::Fill(2)
-            $contentView.ReadOnly = $true
-            $contentView.WordWrap = $true
-
-            # Build content
-            $contentLines = [System.Collections.Generic.List[string]]::new()
-
-            # Add self text if present
-            if (-not [string]::IsNullOrWhiteSpace($post.SelfText)) {
-                $contentLines.Add("--- POST CONTENT ---")
-                $contentLines.Add("")
-                foreach ($line in ($post.SelfText -split "`n")) {
-                    $contentLines.Add($line)
-                }
-                $contentLines.Add("")
-                $contentLines.Add("--- COMMENTS ---")
-                $contentLines.Add("")
-            } else {
-                if ($post.IsLink) {
-                    $contentLines.Add("Link: $($post.LinkUrl)")
-                    $contentLines.Add("")
-                }
-                $contentLines.Add("--- COMMENTS ---")
-                $contentLines.Add("")
-            }
-
-            # Show loading message
-            $contentLines.Add("Loading comments...")
-            $contentView.Text = ($contentLines -join "`n")
-            $dialog.Add($contentView)
-
-            # Open in Browser button
-            $openBtn = [Terminal.Gui.Button]::new()
-            $openBtn.Text = "Open in Browser (O)"
-            $openBtn.X = [Terminal.Gui.Pos]::Center() - 15
-            $openBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-            $openBtn.add_Clicked({
-                $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                Start-Process $urlToOpen
-            }.GetNewClosure())
-            $dialog.Add($openBtn)
-
-            # Close button
-            $closeBtn = [Terminal.Gui.Button]::new()
-            $closeBtn.Text = "Close (ESC)"
-            $closeBtn.X = [Terminal.Gui.Pos]::Center() + 8
-            $closeBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-            $closeBtn.add_Clicked({ [Terminal.Gui.Application]::RequestStop() })
-            $dialog.Add($closeBtn)
-
-            # Handle O key to open in browser
-            $dialog.add_KeyPress({
-                param($keyEvent)
-                # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-                if ($null -ne $keyEvent.Key) {
-                    $key = $keyEvent.Key.ToString()
-                    if ($key -eq 'O' -or $key -eq 'o') {
-                        $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                        Start-Process $urlToOpen
-                        $keyEvent.Handled = $true
-                    }
-                }
-            }.GetNewClosure())
-
-            # Load comments in background after dialog shows
-            $loadCommentsAction = {
-                try {
-                    Write-Log -Message "TUI: Fetching comments for permalink: $($post.Permalink)" -Level Debug
-                    $comments = Get-RedditComments -Permalink $post.Permalink -Limit 30
-
-                    # Rebuild content with comments
-                    $newContent = [System.Collections.Generic.List[string]]::new()
-
-                    if (-not [string]::IsNullOrWhiteSpace($post.SelfText)) {
-                        $newContent.Add("📝 POST CONTENT")
-                        $newContent.Add("─────────────────────────────────────────")
-                        $newContent.Add("")
-                        foreach ($line in ($post.SelfText -split "`n")) {
-                            $newContent.Add($line)
-                        }
-                        $newContent.Add("")
-                        $newContent.Add("💬 COMMENTS ($($comments.Count) loaded)")
-                        $newContent.Add("─────────────────────────────────────────")
-                        $newContent.Add("")
-                    } else {
-                        if ($post.IsLink) {
-                            $newContent.Add("🔗 Link: $($post.LinkUrl)")
-                            $newContent.Add("")
-                        }
-                        $newContent.Add("💬 COMMENTS ($($comments.Count) loaded)")
-                        $newContent.Add("─────────────────────────────────────────")
-                        $newContent.Add("")
-                    }
-
-                    if ($comments.Count -gt 0) {
-                        $formattedComments = & $formatComments $comments 3
-                        foreach ($line in $formattedComments) {
-                            $newContent.Add($line)
-                        }
-                    } else {
-                        $newContent.Add("No comments yet.")
-                    }
-
-                    $contentView.Text = ($newContent -join "`n")
-                    Write-Log -Message "TUI: Displayed $($comments.Count) comments" -Level Debug
-                }
-                catch {
-                    Write-Log -Message "TUI: Failed to load comments for: $($post.Permalink)" -Level Error -ErrorRecord $_
-                    $contentView.Text = "Failed to load comments: $_"
-                }
-            }
-
-            # Fetch comments before showing dialog
-            & $loadCommentsAction
-
-            # Show dialog
-            Write-Log -Message "TUI: About to show post detail dialog" -Level Debug
-            Write-Log -Message "TUI: Dialog object null check: $($null -ne $dialog)" -Level Debug
-            try {
-                [Terminal.Gui.Application]::Run($dialog)
-                Write-Log -Message "TUI: Post detail dialog closed normally" -Level Debug
-            }
-            catch {
-                Write-Log -Message "TUI: CRASH - Failed to run post detail dialog" -Level Error -ErrorRecord $_
-                throw
-            }
-        }
-
-        # Function to load posts
-        $loadPosts = {
-            param($subreddit)
-
-            $script:IsSearchResults = $false
-            $sort = $script:CurrentSort
-            $time = $script:CurrentTime
-
-            Write-Log -Message "TUI: Loading posts for r/$subreddit (sort: $sort, time: $time)" -Level Info
-
-            try {
-                $sortInfo = if ($sort -eq 'top') { "$sort/$time" } else { $sort }
-                $contentFrame.Title = "r/$subreddit/$sortInfo (Loading...)"
-                [Terminal.Gui.Application]::Refresh()
-
-                $script:CurrentPosts = Get-RedditPosts -Subreddit $subreddit -Sort $sort -Time $time -ErrorAction Stop
-
-                $postsList = [System.Collections.Generic.List[string]]::new()
-                foreach ($post in $script:CurrentPosts) {
-                    $score = $post.Score.ToString().PadLeft(5)
-                    $comments = $post.NumComments.ToString().PadLeft(4)
-                    $title = $post.Title
-                    if ($title.Length -gt 80) {
-                        # Truncate to 77 characters + "..." (3 chars) = 80 total
-                        $title = $title.Substring(0, 77) + "..."
-                    }
-                    $postsList.Add("⬆$score 💬$comments │ $title")
-                }
-
-                $postsListView.SetSource($postsList)
-                $contentFrame.Title = "r/$subreddit/$sortInfo - $($script:CurrentPosts.Count) posts (Enter=view, O=open)"
-                Write-Log -Message "TUI: Displayed $($script:CurrentPosts.Count) posts for r/$subreddit" -Level Debug
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to load r/$subreddit (sort: $sort, time: $time)" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load subreddit: $_", @("OK"))
-                $contentFrame.Title = "r/$subreddit (Error)"
-            }
-        }
-
-        # Function to search posts
-        $searchPosts = {
-            param($query, $subreddit, $globalSearch)
-
-            $script:IsSearchResults = $true
-
-            Write-Log -Message "TUI: Searching for '$query' (global: $globalSearch, subreddit: $subreddit)" -Level Info
-
-            try {
-                $searchScope = if ($globalSearch) { "All Reddit" } else { "r/$subreddit" }
-                $contentFrame.Title = "Searching $searchScope for '$query'..."
-                [Terminal.Gui.Application]::Refresh()
-
-                if ($globalSearch) {
-                    $script:CurrentPosts = Search-Reddit -Query $query -ErrorAction Stop
-                } else {
-                    $script:CurrentPosts = Search-Reddit -Query $query -Subreddit $subreddit -ErrorAction Stop
-                }
-
-                $postsList = [System.Collections.Generic.List[string]]::new()
-                foreach ($post in $script:CurrentPosts) {
-                    $score = $post.Score.ToString().PadLeft(5)
-                    $comments = $post.NumComments.ToString().PadLeft(4)
-                    $sub = $post.Subreddit
-                    $title = $post.Title
-                    # Shorter title for search results to show subreddit
-                    if ($title.Length -gt 60) {
-                        $title = $title.Substring(0, 57) + "..."
-                    }
-                    $postsList.Add("⬆$score 💬$comments │ r/$sub │ $title")
-                }
-
-                $postsListView.SetSource($postsList)
-                $resultScope = if ($globalSearch) { "Reddit" } else { "r/$subreddit" }
-                $contentFrame.Title = "Search '$query' in $resultScope - $($script:CurrentPosts.Count) results (Enter=view, O=open)"
-                Write-Log -Message "TUI: Search returned $($script:CurrentPosts.Count) results" -Level Debug
-            }
-            catch {
-                Write-Log -Message "TUI: Search failed for '$query' (global: $globalSearch, subreddit: $subreddit)" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Search failed: $_", @("OK"))
-                $contentFrame.Title = "Search Error"
-            }
-        }
-
-        # Search button click event
-        $searchBtn.add_Clicked({
-            try {
-                $query = $searchInput.Text.ToString().Trim()
-                if ($query) {
-                    $subreddit = $subredditInput.Text.ToString().Trim()
-                    $globalSearch = $searchGlobalCheck.Checked
-                    Write-Log -Message "TUI: Search button clicked - query: '$query', global: $globalSearch" -Level Debug
-                    & $searchPosts $query $subreddit $globalSearch
-                } else {
-                    [Terminal.Gui.MessageBox]::Query("Search", "Please enter a search query", @("OK"))
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to search" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to search: $_", @("OK"))
-            }
-        })
-
-        # Post selection event - open post detail
-        $postsListView.add_OpenSelectedItem({
-            Write-Log -Message "TUI: EVENT - Posts list OpenSelectedItem triggered" -Level Debug
-            try {
-                $selected = $postsListView.SelectedItem
-                Write-Log -Message "TUI: EVENT - Selected post index: $selected, Total posts: $($script:CurrentPosts.Count)" -Level Debug
-                if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
-                    $selectedPost = $script:CurrentPosts[$selected]
-                    Write-Log -Message "TUI: EVENT - Opening post detail for: $($selectedPost.Title)" -Level Debug
-                    Write-Log -Message "TUI: EVENT - Calling showPostDetail scriptblock" -Level Debug
-                    & $showPostDetail $selectedPost
-                    Write-Log -Message "TUI: EVENT - showPostDetail completed" -Level Debug
-                } else {
-                    Write-Log -Message "TUI: EVENT - Invalid selection index: $selected" -Level Warning
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: EVENT - Failed to show post detail" -Level Error -ErrorRecord $_
-                Write-Log -Message "TUI: EVENT - Showing error dialog" -Level Debug
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to open post: $_", @("OK"))
-                Write-Log -Message "TUI: EVENT - Error dialog shown" -Level Debug
-            }
-        })
-
-        # Key press handler for posts list (O to open in browser)
-        $postsListView.add_KeyPress({
-            param($keyEvent)
-            # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-            if ($null -ne $keyEvent.Key) {
-                $key = $keyEvent.Key.ToString()
-                if ($key -eq 'O' -or $key -eq 'o') {
-                    $selected = $postsListView.SelectedItem
-                    if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
-                        $selectedPost = $script:CurrentPosts[$selected]
-                        $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
-                        Start-Process $urlToOpen
-                        $keyEvent.Handled = $true
-                    }
-                }
-            }
-        }.GetNewClosure())
-
-        # Load button click event
-        $loadBtn.add_Clicked({
-            try {
-                $sub = $subredditInput.Text.ToString().Trim()
-                if ($sub) {
-                    Write-Log -Message "TUI: Load button clicked for: $sub" -Level Debug
-                    & $loadPosts $sub
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to load subreddit" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load subreddit: $_", @("OK"))
-            }
-        })
-
-        # Favorites list selection event
-        $favoritesList.add_OpenSelectedItem({
-            try {
-                $selected = $favoritesList.SelectedItem
-                if ($selected -ge 0 -and $selected -lt $favoritesSource.Count) {
-                    $fav = $favoritesSource[$selected].ToString().Replace("r/", "")
-                    Write-Log -Message "TUI: Favorite selected: $fav" -Level Debug
-                    $subredditInput.Text = $fav
-                    & $loadPosts $fav
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to load favorite" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load favorite: $_", @("OK"))
-            }
-        })
-
-        # Add favorite button event
-        $addFavBtn.add_Clicked({
-            try {
-                $sub = $subredditInput.Text.ToString().Trim()
-                if ($sub) {
-                    Write-Log -Message "TUI: Add favorite button clicked for: $sub" -Level Debug
-                    Add-Favorite -Subreddit $sub
-                    if ($script:Favorites -contains $sub) {
-                        $favoritesSource.Clear()
-                        foreach ($fav in $script:Favorites) {
-                            $favoritesSource.Add("r/$fav")
-                        }
-                        $favoritesList.SetSource($favoritesSource)
-                    }
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to add favorite" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to add favorite: $_", @("OK"))
-            }
-        })
-        
-        # Remove favorite button event
-        $removeFavBtn.add_Clicked({
-            try {
-                $selected = $favoritesList.SelectedItem
-                if ($selected -ge 0 -and $selected -lt $favoritesSource.Count) {
-                    $fav = $favoritesSource[$selected].ToString().Replace("r/", "")
-                    Write-Log -Message "TUI: Remove favorite button clicked for: $fav" -Level Debug
-                    Remove-Favorite -Subreddit $fav
-                    $favoritesSource.Clear()
-                    foreach ($f in $script:Favorites) {
-                        $favoritesSource.Add("r/$f")
-                    }
-                    $favoritesList.SetSource($favoritesSource)
-                }
-            }
-            catch {
-                Write-Log -Message "TUI: Failed to remove favorite" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to remove favorite: $_", @("OK"))
-            }
-        })
-
-        # Add frames to window
-        Write-Log -Message "TUI: Building UI components" -Level Debug
-        $win.Add($favoritesFrame)
-        $win.Add($contentFrame)
-        $top.Add($win)
-
-        # Load initial subreddit
-        & $loadPosts $InitialSubreddit
-
-        # Run the application
-        Write-Log -Message "TUI: Starting application main loop" -Level Info
-        Write-Log -Message "TUI: About to call Terminal.Gui.Application.Run() with explicit toplevel" -Level Debug
-        Write-Log -Message "TUI: Application state - Top: $($null -ne $top), Win: $($null -ne $win)" -Level Debug
-
+    # Initialize state
+    $script:CurrentSubreddit = $InitialSubreddit
+    $script:CurrentSort = "hot"
+    $script:CurrentTime = "day"
+    $script:CurrentPosts = @()
+    $script:Running = $true
+
+    Write-SpectreHost "`n[bold cyan]PSRedditTUI - Reddit Terminal Browser[/]`n" -NoNewline
+
+    # Main loop
+    while ($script:Running) {
         try {
-            [Terminal.Gui.Application]::Run($top)
-            Write-Log -Message "TUI: Application.Run() returned normally" -Level Debug
+            # Show main menu
+            $mainChoice = Read-SpectreSelection -Title "[bold yellow]Main Menu[/]" -Choices @(
+                "📖 Browse Subreddit: r/$($script:CurrentSubreddit)",
+                "⭐ Manage Favorites",
+                "🔍 Search Reddit",
+                "⚙️  Settings",
+                "❌ Exit"
+            ) -Color "Cyan"
+
+            switch -Wildcard ($mainChoice) {
+                "📖 Browse*" {
+                    Show-BrowseSubredditMenu
+                }
+                "⭐ Manage*" {
+                    Show-FavoritesMenu
+                }
+                "🔍 Search*" {
+                    Show-SearchMenu
+                }
+                "⚙️  Settings*" {
+                    Show-SettingsMenu
+                }
+                "❌ Exit*" {
+                    $script:Running = $false
+                    Write-SpectreHost "`n[green]Thanks for using PSRedditTUI! 👋[/]`n"
+                }
+            }
         }
         catch {
-            Write-Log -Message "TUI: CRASH - Exception caught at Application.Run() level" -Level Error
-            Write-Log -Message "TUI: CRASH - Application.Run() threw exception" -Level Error -ErrorRecord $_
-            throw
+            Write-Log -Message "Error in main menu loop" -Level Error -ErrorRecord $_
+            Write-SpectreHost "`n[red]Error: $_[/]`n"
+            Start-Sleep -Seconds 2
         }
+    }
 
-        Write-Log -Message "TUI: Application main loop ended normally" -Level Debug
-    }
-    catch {
-        Write-Log -Message "TUI: Unhandled exception in application" -Level Error -ErrorRecord $_
-        throw
-    }
-    finally {
-        Write-Log -Message "TUI: Shutting down application" -Level Info
+    Write-Log -Message "Show-RedditTUI exiting normally" -Level Info
+}
+
+function Show-BrowseSubredditMenu {
+    <#
+    .SYNOPSIS
+        Shows the browse subreddit submenu
+    #>
+    [CmdletBinding()]
+    param()
+
+    $back = $false
+    while (-not $back) {
         try {
-            [Terminal.Gui.Application]::Shutdown()
-            Write-Log -Message "TUI: Application shutdown complete" -Level Debug
+            $choices = @(
+                "📋 View Posts (Sort: $($script:CurrentSort)$(if ($script:CurrentSort -eq 'top') { "/$($script:CurrentTime)" }))",
+                "🔄 Change Subreddit",
+                "📊 Change Sort",
+                "⬅️  Back to Main Menu"
+            )
+
+            $choice = Read-SpectreSelection -Title "[bold yellow]Browse r/$($script:CurrentSubreddit)[/]" -Choices $choices -Color "Cyan"
+
+            switch -Wildcard ($choice) {
+                "📋 View Posts*" {
+                    Show-PostsList
+                }
+                "🔄 Change Subreddit*" {
+                    $newSub = Read-SpectreText -Prompt "Enter subreddit name" -DefaultAnswer $script:CurrentSubreddit
+                    if (-not [string]::IsNullOrWhiteSpace($newSub)) {
+                        $script:CurrentSubreddit = $newSub -replace '^r/', ''
+                        Write-Log -Message "Changed subreddit to: $($script:CurrentSubreddit)" -Level Info
+                    }
+                }
+                "📊 Change Sort*" {
+                    $sortChoice = Read-SpectreSelection -Title "Select Sort Order" -Choices @("hot", "new", "top", "rising") -Color "Green"
+                    $script:CurrentSort = $sortChoice
+                    
+                    if ($sortChoice -eq "top") {
+                        $timeChoice = Read-SpectreSelection -Title "Select Time Filter" -Choices @("hour", "day", "week", "month", "year", "all") -Color "Green"
+                        $script:CurrentTime = $timeChoice
+                    }
+                    
+                    Write-Log -Message "Changed sort to: $($script:CurrentSort)$(if ($script:CurrentSort -eq 'top') { "/$($script:CurrentTime)" })" -Level Info
+                }
+                "⬅️  Back*" {
+                    $back = $true
+                }
+            }
         }
         catch {
-            Write-Log -Message "TUI: Error during shutdown" -Level Error -ErrorRecord $_
+            Write-Log -Message "Error in browse menu" -Level Error -ErrorRecord $_
+            Write-SpectreHost "`n[red]Error: $_[/]`n"
+            Start-Sleep -Seconds 2
         }
     }
 }
 
-#endregion
-
-#region Dependency Management
-
-function Install-PSRedditTUITerminalGui {
+function Show-PostsList {
     <#
     .SYNOPSIS
-        Installs Terminal.Gui dependency for PSRedditTUI
-    .DESCRIPTION
-        Downloads Terminal.Gui and its NStack.Core dependency from NuGet and extracts them to ~/.psreddittui-packages/.
-        Defaults to v1.16.0 which is the stable version used by Microsoft.PowerShell.ConsoleGuiTools.
-        Terminal.Gui v2.x has compatibility issues with PowerShell and is not recommended.
-    .PARAMETER Version
-        The Terminal.Gui version to install (default: 1.16.0 - same as Microsoft.PowerShell.ConsoleGuiTools)
-    .PARAMETER NStackVersion
-        The NStack.Core version to install (default: 1.0.0 - compatible with Terminal.Gui 1.16.0)
-    .PARAMETER Force
-        Force reinstallation even if Terminal.Gui is already installed
-    .EXAMPLE
-        Install-PSRedditTUITerminalGui
-        Installs Terminal.Gui 1.16.0 and NStack.Core 1.0.0 to the local package directory
-    .EXAMPLE
-        Install-PSRedditTUITerminalGui -Version "1.16.0" -Force
-        Forces reinstallation of Terminal.Gui 1.16.0 and NStack.Core
+        Shows the list of posts for the current subreddit
     #>
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $false)]
-        [string]$Version = "1.16.0",
+    param()
 
-        [Parameter(Mandatory = $false)]
-        [string]$NStackVersion = "1.0.0",
-
-        [Parameter(Mandatory = $false)]
-        [switch]$Force
-    )
+    Write-SpectreHost "`n[yellow]Loading posts from r/$($script:CurrentSubreddit)...[/]`n"
 
     try {
-        $packageDir = Join-Path $HOME ".psreddittui-packages"
-        $terminalGuiExtractPath = Join-Path $packageDir "Terminal.Gui"
-        $nstackExtractPath = Join-Path $packageDir "NStack.Core"
-        $terminalGuiDllPath = Join-Path $terminalGuiExtractPath "lib/net8.0/Terminal.Gui.dll"
-        $nstackDllPath = Join-Path $nstackExtractPath "lib/netstandard2.0/NStack.dll"
+        $script:CurrentPosts = Get-RedditPosts -Subreddit $script:CurrentSubreddit -Sort $script:CurrentSort -Time $script:CurrentTime
 
-        # Check if already installed (skip if -Force)
-        if (-not $Force) {
-            if ((Test-Path $terminalGuiDllPath) -and (Test-Path $nstackDllPath)) {
-                Write-Log -Message "Terminal.Gui and NStack already installed" -Level Info
-                Write-Information "Terminal.Gui and NStack are already installed. Use -Force to reinstall." -InformationAction Continue
+        if ($script:CurrentPosts.Count -eq 0) {
+            Write-SpectreHost "[yellow]No posts found.[/]`n"
+            Start-Sleep -Seconds 2
+            return
+        }
 
-                # Try to load if not already loaded (NStack first, then Terminal.Gui)
-                if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
-                    try {
-                        Add-Type -Path $nstackDllPath -ErrorAction Stop
-                        Write-Log -Message "Loaded NStack assembly from: $nstackDllPath" -Level Info
-                    }
-                    catch {
-                        Write-Log -Message "Failed to load existing NStack assembly" -Level Error -ErrorRecord $_
-                    }
+        # Create table for display
+        $table = Format-SpectreTable -Data $script:CurrentPosts -Property @(
+            @{Label = "Score"; Expression = { "⬆ $($_.Score)" }},
+            @{Label = "Comments"; Expression = { "💬 $($_.NumComments)" }},
+            @{Label = "Title"; Expression = { 
+                if ($_.Title.Length -gt 70) {
+                    $_.Title.Substring(0, 67) + "..."
+                } else {
+                    $_.Title
                 }
+            }},
+            @{Label = "Author"; Expression = { "u/$($_.Author)" }}
+        ) -Border Rounded -Color Cyan
 
-                if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
-                    try {
-                        Add-Type -Path $terminalGuiDllPath -ErrorAction Stop
-                        Write-Log -Message "Loaded Terminal.Gui assembly from: $terminalGuiDllPath" -Level Info
-                    }
-                    catch {
-                        Write-Log -Message "Failed to load existing Terminal.Gui assembly" -Level Error -ErrorRecord $_
-                    }
-                }
+        Write-SpectreHost $table
 
-                return [PSCustomObject]@{
-                    TerminalGuiVersion = $Version
-                    NStackVersion = $NStackVersion
-                    TerminalGuiPath = $terminalGuiDllPath
-                    NStackPath = $nstackDllPath
-                    Loaded = $true
-                    Message = "Terminal.Gui and NStack already installed"
-                }
+        # Create menu choices from posts
+        $postChoices = for ($i = 0; $i -lt [Math]::Min($script:CurrentPosts.Count, 20); $i++) {
+            $post = $script:CurrentPosts[$i]
+            $title = if ($post.Title.Length -gt 60) {
+                $post.Title.Substring(0, 57) + "..."
+            } else {
+                $post.Title
             }
+            "[$i] $title"
         }
+        $postChoices += "⬅️  Back"
 
-        # Create package directory
-        Write-Log -Message "Creating package directory: $packageDir" -Level Debug
-        New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+        $selection = Read-SpectreSelection -Title "[bold yellow]Select a post to view (Showing top $([Math]::Min($script:CurrentPosts.Count, 20)))[/]" -Choices $postChoices -Color "Cyan"
 
-        # ===== Install NStack.Core first (dependency) =====
-        Write-Log -Message "Downloading NStack.Core $NStackVersion from NuGet..." -Level Info
-        Write-Information "Downloading NStack.Core $NStackVersion..." -InformationAction Continue
-
-        $nstackNupkgUrl = "https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion"
-        $nstackNupkgPath = Join-Path $packageDir "NStack.Core.$NStackVersion.nupkg"
-
-        Invoke-WebRequest -Uri $nstackNupkgUrl -OutFile $nstackNupkgPath -ErrorAction Stop
-        Write-Log -Message "Downloaded NStack.Core to: $nstackNupkgPath" -Level Debug
-
-        # Extract NStack package
-        Write-Log -Message "Extracting NStack.Core to: $nstackExtractPath" -Level Info
-        Write-Information "Extracting NStack.Core..." -InformationAction Continue
-
-        if (Test-Path $nstackExtractPath) {
-            Remove-Item -Path $nstackExtractPath -Recurse -Force
-        }
-
-        $nstackZipPath = $nstackNupkgPath -replace '\.nupkg$', '.zip'
-        if (Test-Path $nstackZipPath) {
-            Remove-Item -Path $nstackZipPath -Force
-        }
-        Copy-Item -Path $nstackNupkgPath -Destination $nstackZipPath -Force
-        Expand-Archive -Path $nstackZipPath -DestinationPath $nstackExtractPath -Force
-        Remove-Item -Path $nstackZipPath -Force -ErrorAction SilentlyContinue
-
-        # Find NStack.dll
-        if (-not (Test-Path $nstackDllPath)) {
-            Write-Log -Message "netstandard2.0 NStack.dll not found, searching for alternatives..." -Level Debug
-            $nstackDllPath = Get-ChildItem -Path $nstackExtractPath -Recurse -Filter "NStack.dll" |
-                             Select-Object -First 1 -ExpandProperty FullName
-        }
-
-        if (-not $nstackDllPath -or -not (Test-Path $nstackDllPath)) {
-            $errorMsg = "Could not find NStack.dll in extracted package"
-            Write-Log -Message $errorMsg -Level Error
-            throw $errorMsg
-        }
-
-        Write-Log -Message "Found NStack.dll at: $nstackDllPath" -Level Info
-        Write-Information "NStack.Core installed successfully!" -InformationAction Continue
-
-        # ===== Install Terminal.Gui =====
-        Write-Log -Message "Downloading Terminal.Gui $Version from NuGet..." -Level Info
-        Write-Information "Downloading Terminal.Gui $Version..." -InformationAction Continue
-
-        $terminalGuiNupkgUrl = "https://www.nuget.org/api/v2/package/Terminal.Gui/$Version"
-        $terminalGuiNupkgPath = Join-Path $packageDir "Terminal.Gui.$Version.nupkg"
-
-        Invoke-WebRequest -Uri $terminalGuiNupkgUrl -OutFile $terminalGuiNupkgPath -ErrorAction Stop
-        Write-Log -Message "Downloaded Terminal.Gui to: $terminalGuiNupkgPath" -Level Debug
-
-        # Extract Terminal.Gui package
-        Write-Log -Message "Extracting Terminal.Gui to: $terminalGuiExtractPath" -Level Info
-        Write-Information "Extracting Terminal.Gui..." -InformationAction Continue
-
-        if (Test-Path $terminalGuiExtractPath) {
-            Remove-Item -Path $terminalGuiExtractPath -Recurse -Force
-        }
-
-        $terminalGuiZipPath = $terminalGuiNupkgPath -replace '\.nupkg$', '.zip'
-        if (Test-Path $terminalGuiZipPath) {
-            Remove-Item -Path $terminalGuiZipPath -Force
-        }
-        Copy-Item -Path $terminalGuiNupkgPath -Destination $terminalGuiZipPath -Force
-        Expand-Archive -Path $terminalGuiZipPath -DestinationPath $terminalGuiExtractPath -Force
-        Remove-Item -Path $terminalGuiZipPath -Force -ErrorAction SilentlyContinue
-
-        # Find Terminal.Gui.dll - prefer net8.0 for PowerShell 7.4+
-        if (-not (Test-Path $terminalGuiDllPath)) {
-            Write-Log -Message "net8.0 Terminal.Gui.dll not found, searching for alternatives..." -Level Debug
-            $terminalGuiDllPath = Get-ChildItem -Path $terminalGuiExtractPath -Recurse -Filter "Terminal.Gui.dll" |
-                                  Where-Object { $_.FullName -match 'net[78]' } |
-                                  Select-Object -First 1 -ExpandProperty FullName
-        }
-
-        if (-not $terminalGuiDllPath -or -not (Test-Path $terminalGuiDllPath)) {
-            $errorMsg = "Could not find Terminal.Gui.dll in extracted package"
-            Write-Log -Message $errorMsg -Level Error
-            throw $errorMsg
-        }
-
-        Write-Log -Message "Found Terminal.Gui.dll at: $terminalGuiDllPath" -Level Info
-        Write-Information "Terminal.Gui installed successfully!" -InformationAction Continue
-
-        # ===== Load assemblies (NStack first, then Terminal.Gui) =====
-        # Load NStack first (dependency)
-        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
-            Write-Log -Message "Loading NStack assembly..." -Level Info
-            Write-Information "Loading NStack assembly..." -InformationAction Continue
-            Add-Type -Path $nstackDllPath -ErrorAction Stop
-            Write-Log -Message "Successfully loaded NStack assembly" -Level Info
-            Write-Information "Loaded: $nstackDllPath" -InformationAction Continue
-        }
-        else {
-            Write-Log -Message "NStack assembly already loaded in current session" -Level Info
-        }
-
-        # Load Terminal.Gui
-        if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
-            Write-Log -Message "Loading Terminal.Gui assembly..." -Level Info
-            Write-Information "Loading Terminal.Gui assembly..." -InformationAction Continue
-            Add-Type -Path $terminalGuiDllPath -ErrorAction Stop
-            Write-Log -Message "Successfully loaded Terminal.Gui assembly" -Level Info
-            Write-Information "Loaded: $terminalGuiDllPath" -InformationAction Continue
-        }
-        else {
-            Write-Log -Message "Terminal.Gui assembly already loaded in current session" -Level Info
-        }
-
-        # Return success information
-        return [PSCustomObject]@{
-            TerminalGuiVersion = $Version
-            NStackVersion = $NStackVersion
-            TerminalGuiPath = $terminalGuiDllPath
-            NStackPath = $nstackDllPath
-            Loaded = $true
-            Message = "Terminal.Gui and NStack installed and loaded successfully"
+        if ($selection -notmatch "⬅️") {
+            # Extract index from selection
+            if ($selection -match '^\[(\d+)\]') {
+                $index = [int]$matches[1]
+                Show-PostDetail -Post $script:CurrentPosts[$index]
+            }
         }
     }
     catch {
-        Write-Log -Message "Failed to install Terminal.Gui and NStack" -Level Error -ErrorRecord $_
-        throw "Failed to install Terminal.Gui: $_`n`nFor manual installation instructions, run: Get-Help Install-PSRedditTUITerminalGui -Full"
+        Write-Log -Message "Error loading posts" -Level Error -ErrorRecord $_
+        Write-SpectreHost "`n[red]Failed to load posts: $_[/]`n"
+        Start-Sleep -Seconds 2
+    }
+}
+
+function Show-PostDetail {
+    <#
+    .SYNOPSIS
+        Shows detailed view of a post with comments
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Post
+    )
+
+    try {
+        # Create post header panel
+        $headerText = @"
+[bold cyan]r/$($Post.Subreddit)[/] │ [green]u/$($Post.Author)[/]
+⬆ [yellow]$($Post.Score)[/] │ 💬 [magenta]$($Post.NumComments)[/] comments
+[dim]Posted: $($Post.Created)[/]
+"@
+
+        $titlePanel = Format-SpectrePanel -Data "[bold white]$($Post.Title)[/]" -Header "Post Details" -Border Rounded -Color Cyan
+        Write-SpectreHost $titlePanel
+
+        $headerPanel = Format-SpectrePanel -Data $headerText -Border Rounded -Color Green
+        Write-SpectreHost $headerPanel
+
+        # Show content if available
+        if (-not [string]::IsNullOrWhiteSpace($Post.SelfText)) {
+            $contentPanel = Format-SpectrePanel -Data $Post.SelfText -Header "Content" -Border Rounded -Color Yellow
+            Write-SpectreHost $contentPanel
+        } elseif ($Post.IsLink) {
+            $linkPanel = Format-SpectrePanel -Data "[link]$($Post.LinkUrl)[/]" -Header "Link" -Border Rounded -Color Blue
+            Write-SpectreHost $linkPanel
+        }
+
+        # Load and show comments
+        Write-SpectreHost "`n[yellow]Loading comments...[/]`n"
+        $comments = Get-RedditComments -Permalink $Post.Permalink -Limit 25
+
+        if ($comments.Count -gt 0) {
+            Write-SpectreHost "[bold cyan]Comments ($($comments.Count) loaded):[/]`n"
+            Show-Comments -Comments $comments -MaxDepth 3
+        } else {
+            Write-SpectreHost "[yellow]No comments yet.[/]`n"
+        }
+
+        # Action menu
+        $action = Read-SpectreSelection -Title "Actions" -Choices @(
+            "🌐 Open in Browser",
+            "⬅️  Back to Posts"
+        ) -Color "Cyan"
+
+        if ($action -match "🌐 Open") {
+            $urlToOpen = if ($Post.IsLink) { $Post.LinkUrl } else { $Post.Url }
+            Start-Process $urlToOpen
+            Write-SpectreHost "[green]Opened in browser![/]`n"
+            Start-Sleep -Seconds 1
+        }
+    }
+    catch {
+        Write-Log -Message "Error showing post detail" -Level Error -ErrorRecord $_
+        Write-SpectreHost "`n[red]Failed to load post: $_[/]`n"
+        Start-Sleep -Seconds 2
+    }
+}
+
+function Show-Comments {
+    <#
+    .SYNOPSIS
+        Recursively displays comments with proper indentation
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Comments,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxDepth = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$CurrentDepth = 0
+    )
+
+    foreach ($comment in $Comments) {
+        if ($CurrentDepth -ge $MaxDepth) {
+            continue
+        }
+
+        $indent = "  " * $comment.Depth
+        $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
+        $scoreColor = if ($comment.Score -ge 0) { "green" } else { "red" }
+
+        # Author line
+        Write-SpectreHost "$indent[bold $scoreColor]⬆ $($comment.Score)[/] [cyan]u/$($comment.Author)[/]$opTag"
+
+        # Body
+        $bodyLines = $comment.Body -split "`n"
+        foreach ($line in $bodyLines) {
+            Write-SpectreHost "$indent  [white]$line[/]"
+        }
+        Write-SpectreHost ""
+
+        # Show replies
+        if ($comment.Replies.Count -gt 0) {
+            Show-Comments -Comments $comment.Replies -MaxDepth $MaxDepth -CurrentDepth ($CurrentDepth + 1)
+        }
+    }
+}
+
+function Show-FavoritesMenu {
+    <#
+    .SYNOPSIS
+        Shows the favorites management menu
+    #>
+    [CmdletBinding()]
+    param()
+
+    $back = $false
+    while (-not $back) {
+        try {
+            # Reload favorites
+            Get-Favorites | Out-Null
+
+            $choices = @()
+            if ($script:Favorites.Count -gt 0) {
+                $choices += "📋 View/Select Favorite"
+                $choices += "➕ Add New Favorite"
+                $choices += "➖ Remove Favorite"
+            } else {
+                $choices += "➕ Add New Favorite"
+            }
+            $choices += "⬅️  Back to Main Menu"
+
+            $choice = Read-SpectreSelection -Title "[bold yellow]Favorites Management[/]" -Choices $choices -Color "Cyan"
+
+            switch -Wildcard ($choice) {
+                "📋 View*" {
+                    $favChoices = $script:Favorites | ForEach-Object { "r/$_" }
+                    $favChoices += "⬅️  Back"
+                    
+                    $selected = Read-SpectreSelection -Title "Select a favorite subreddit" -Choices $favChoices -Color "Green"
+                    
+                    if ($selected -notmatch "⬅️") {
+                        $script:CurrentSubreddit = $selected -replace '^r/', ''
+                        Write-SpectreHost "[green]Switched to r/$($script:CurrentSubreddit)[/]`n"
+                        Start-Sleep -Seconds 1
+                        $back = $true
+                    }
+                }
+                "➕ Add*" {
+                    $newFav = Read-SpectreText -Prompt "Enter subreddit name to add"
+                    if (-not [string]::IsNullOrWhiteSpace($newFav)) {
+                        Add-Favorite -Subreddit $newFav
+                        Write-SpectreHost "[green]Added r/$($newFav -replace '^r/', '') to favorites![/]`n"
+                        Start-Sleep -Seconds 1
+                    }
+                }
+                "➖ Remove*" {
+                    if ($script:Favorites.Count -gt 0) {
+                        $favChoices = $script:Favorites | ForEach-Object { "r/$_" }
+                        $favChoices += "⬅️  Cancel"
+                        
+                        $selected = Read-SpectreSelection -Title "Select favorite to remove" -Choices $favChoices -Color "Red"
+                        
+                        if ($selected -notmatch "⬅️" -and $selected -notmatch "Cancel") {
+                            $toRemove = $selected -replace '^r/', ''
+                            Remove-Favorite -Subreddit $toRemove
+                            Write-SpectreHost "[green]Removed r/$toRemove from favorites![/]`n"
+                            Start-Sleep -Seconds 1
+                        }
+                    }
+                }
+                "⬅️  Back*" {
+                    $back = $true
+                }
+            }
+        }
+        catch {
+            Write-Log -Message "Error in favorites menu" -Level Error -ErrorRecord $_
+            Write-SpectreHost "`n[red]Error: $_[/]`n"
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
+function Show-SearchMenu {
+    <#
+    .SYNOPSIS
+        Shows the search menu
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $query = Read-SpectreText -Prompt "Enter search query"
+        
+        if ([string]::IsNullOrWhiteSpace($query)) {
+            return
+        }
+
+        $scope = Read-SpectreSelection -Title "Search Scope" -Choices @(
+            "Current Subreddit (r/$($script:CurrentSubreddit))",
+            "All of Reddit"
+        ) -Color "Cyan"
+
+        Write-SpectreHost "`n[yellow]Searching...[/]`n"
+
+        if ($scope -match "Current") {
+            $results = Search-Reddit -Query $query -Subreddit $script:CurrentSubreddit
+        } else {
+            $results = Search-Reddit -Query $query
+        }
+
+        if ($results.Count -eq 0) {
+            Write-SpectreHost "[yellow]No results found.[/]`n"
+            Start-Sleep -Seconds 2
+            return
+        }
+
+        # Show results in table
+        $table = Format-SpectreTable -Data $results -Property @(
+            @{Label = "Score"; Expression = { "⬆ $($_.Score)" }},
+            @{Label = "Sub"; Expression = { "r/$($_.Subreddit)" }},
+            @{Label = "Title"; Expression = { 
+                if ($_.Title.Length -gt 50) {
+                    $_.Title.Substring(0, 47) + "..."
+                } else {
+                    $_.Title
+                }
+            }}
+        ) -Border Rounded -Color Cyan
+
+        Write-SpectreHost $table
+
+        # Create menu choices from results
+        $resultChoices = for ($i = 0; $i -lt [Math]::Min($results.Count, 15); $i++) {
+            $result = $results[$i]
+            $title = if ($result.Title.Length -gt 50) {
+                $result.Title.Substring(0, 47) + "..."
+            } else {
+                $result.Title
+            }
+            "[$i] r/$($result.Subreddit) - $title"
+        }
+        $resultChoices += "⬅️  Back"
+
+        $selection = Read-SpectreSelection -Title "[bold yellow]Search Results (Showing top $([Math]::Min($results.Count, 15)))[/]" -Choices $resultChoices -Color "Cyan"
+
+        if ($selection -notmatch "⬅️") {
+            if ($selection -match '^\[(\d+)\]') {
+                $index = [int]$matches[1]
+                Show-PostDetail -Post $results[$index]
+            }
+        }
+    }
+    catch {
+        Write-Log -Message "Error in search" -Level Error -ErrorRecord $_
+        Write-SpectreHost "`n[red]Search failed: $_[/]`n"
+        Start-Sleep -Seconds 2
+    }
+}
+
+function Show-SettingsMenu {
+    <#
+    .SYNOPSIS
+        Shows the settings menu
+    #>
+    [CmdletBinding()]
+    param()
+
+    $back = $false
+    while (-not $back) {
+        try {
+            $choices = @(
+                "📊 View Logs",
+                "🗑️  Clear Logs",
+                "🔧 Set Log Level (Current: $script:LogLevel)",
+                "⬅️  Back to Main Menu"
+            )
+
+            $choice = Read-SpectreSelection -Title "[bold yellow]Settings[/]" -Choices $choices -Color "Cyan"
+
+            switch -Wildcard ($choice) {
+                "📊 View Logs*" {
+                    $logLines = Get-PSRedditTUILog -Tail 50
+                    if ($logLines) {
+                        $logPanel = Format-SpectrePanel -Data ($logLines -join "`n") -Header "Recent Log Entries (Last 50)" -Border Rounded -Color Yellow
+                        Write-SpectreHost $logPanel
+                        Read-SpectrePause -Message "Press any key to continue"
+                    } else {
+                        Write-SpectreHost "[yellow]No log entries found.[/]`n"
+                        Start-Sleep -Seconds 2
+                    }
+                }
+                "🗑️  Clear Logs*" {
+                    Clear-PSRedditTUILog
+                    Write-SpectreHost "[green]Logs cleared![/]`n"
+                    Start-Sleep -Seconds 1
+                }
+                "🔧 Set Log Level*" {
+                    $level = Read-SpectreSelection -Title "Select Log Level" -Choices @("Debug", "Info", "Warning", "Error") -Color "Green"
+                    Set-PSRedditTUILogLevel -Level $level
+                    Write-SpectreHost "[green]Log level set to: $level[/]`n"
+                    Start-Sleep -Seconds 1
+                }
+                "⬅️  Back*" {
+                    $back = $true
+                }
+            }
+        }
+        catch {
+            Write-Log -Message "Error in settings menu" -Level Error -ErrorRecord $_
+            Write-SpectreHost "`n[red]Error: $_[/]`n"
+            Start-Sleep -Seconds 2
+        }
     }
 }
 
@@ -1721,6 +1247,5 @@ Export-ModuleMember -Function @(
     'Show-RedditTUI',
     'Get-PSRedditTUILog',
     'Clear-PSRedditTUILog',
-    'Set-PSRedditTUILogLevel',
-    'Install-PSRedditTUITerminalGui'
+    'Set-PSRedditTUILogLevel'
 )

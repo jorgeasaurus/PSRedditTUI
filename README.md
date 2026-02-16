@@ -2,6 +2,7 @@
 
 [![CI/CD Pipeline](https://github.com/jorgeasaurus/PSRedditTUI/actions/workflows/ci.yml/badge.svg)](https://github.com/jorgeasaurus/PSRedditTUI/actions/workflows/ci.yml)
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/v/PSRedditTUI)](https://www.powershellgallery.com/packages/PSRedditTUI)
+[![PowerShell Gallery Downloads](https://img.shields.io/powershellgallery/dt/PSRedditTUI)](https://www.powershellgallery.com/packages/PSRedditTUI)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)](https://github.com/jorgeasaurus/PSRedditTUI)
 
 A PowerShell module for browsing Reddit in a Terminal UI (TUI)

@@ -3,8 +3,9 @@
 
 #region Logging
 
-$script:LogFile = Join-Path $HOME ".psreddittui.log"
+$script:LogFile = Join-Path ([System.IO.Path]::GetTempPath()) "psreddittui-debug.log"
 $script:LogLevel = "Debug"  # Debug, Info, Warning, Error
+
 
 function Write-Log {
     <#
@@ -69,14 +70,29 @@ function Write-Log {
     if ($ErrorRecord) {
         $logEntry += "`n  Error Category: $($ErrorRecord.CategoryInfo.Category)"
         $logEntry += "`n  Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+        $logEntry += "`n  Error Type: $($ErrorRecord.Exception.GetType().FullName)"
         $logEntry += "`n  Target Object: $($ErrorRecord.TargetObject)"
+
+        # Add inner exception details if present
+        if ($ErrorRecord.Exception.InnerException) {
+            $logEntry += "`n  Inner Exception: $($ErrorRecord.Exception.InnerException.GetType().FullName)"
+            $logEntry += "`n  Inner Message: $($ErrorRecord.Exception.InnerException.Message)"
+        }
+
         if ($ErrorRecord.InvocationInfo) {
             $logEntry += "`n  Script: $($ErrorRecord.InvocationInfo.ScriptName)"
             $logEntry += "`n  Line: $($ErrorRecord.InvocationInfo.ScriptLineNumber)"
             $logEntry += "`n  Command: $($ErrorRecord.InvocationInfo.MyCommand)"
+            $logEntry += "`n  Position: $($ErrorRecord.InvocationInfo.PositionMessage)"
         }
+
         if ($ErrorRecord.ScriptStackTrace) {
             $logEntry += "`n  Script StackTrace:`n    $($ErrorRecord.ScriptStackTrace -replace "`n", "`n    ")"
+        }
+
+        # Add any additional error data
+        if ($ErrorRecord.ErrorDetails) {
+            $logEntry += "`n  Error Details: $($ErrorRecord.ErrorDetails.Message)"
         }
     }
 
@@ -149,12 +165,26 @@ function Set-PSRedditTUILogLevel {
 # Auto-load Terminal.Gui and NStack if installed via Install-PSRedditTUITerminalGui
 & {
     $packageDir = Join-Path $HOME ".psreddittui-packages"
-    $terminalGuiDll = Join-Path $packageDir "Terminal.Gui/lib/net8.0/Terminal.Gui.dll"
     $nstackDll = Join-Path $packageDir "NStack.Core/lib/netstandard2.0/NStack.dll"
 
-    Write-Log -Message "Checking for Terminal.Gui at: $terminalGuiDll" -Level Debug
+    # Try to find Terminal.Gui.dll in order of preference: net8.0, net7.0, netstandard2.1
+    $terminalGuiDll = $null
+    $possiblePaths = @(
+        "Terminal.Gui/lib/net8.0/Terminal.Gui.dll",
+        "Terminal.Gui/lib/net7.0/Terminal.Gui.dll",
+        "Terminal.Gui/lib/netstandard2.1/Terminal.Gui.dll"
+    )
 
-    if ((Test-Path $nstackDll) -and (Test-Path $terminalGuiDll)) {
+    foreach ($path in $possiblePaths) {
+        $fullPath = Join-Path $packageDir $path
+        if (Test-Path $fullPath) {
+            $terminalGuiDll = $fullPath
+            Write-Log -Message "Found Terminal.Gui at: $terminalGuiDll" -Level Debug
+            break
+        }
+    }
+
+    if ((Test-Path $nstackDll) -and $terminalGuiDll) {
         try {
             if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'NStack' })) {
                 Add-Type -Path $nstackDll
@@ -177,6 +207,10 @@ function Set-PSRedditTUILogLevel {
 # Module variables
 $script:FavoritesFile = Join-Path $HOME ".psreddittui_favorites.json"
 $script:Favorites = @()
+$script:AfterCursor = $null
+$script:LastSearchQuery = $null
+$script:LastSearchSubreddit = $null
+$script:LastSearchGlobal = $false
 
 # Default subreddits to populate on first launch
 $script:DefaultFavorites = @(
@@ -213,7 +247,9 @@ function Get-RedditData {
         [Parameter(Mandatory = $true)]
         [string]$Url
     )
-    
+
+    $ProgressPreference = 'SilentlyContinue'
+
     try {
         # Add .json to the URL path (before any query string)
         if (-not ($Url -match '\.json')) {
@@ -235,56 +271,108 @@ function Get-RedditData {
         $userAgent = "PSRedditTUI/$moduleVersion"
 
         $startTime = Get-Date
-        # Use Invoke-WebRequest to get raw response for validation
-        $webResponse = Invoke-WebRequest -Uri $Url -Method Get -UserAgent $userAgent
-        $duration = ((Get-Date) - $startTime).TotalMilliseconds
+        $rawContent = $null
+        $statusCode = 200
+        $contentType = "application/json"
 
-        # Log response details
-        $statusCode = $webResponse.StatusCode
-        $contentType = $webResponse.Headers['Content-Type']
-        $contentLength = $webResponse.Content.Length
-        Write-Log -Message "Reddit API response: Status=$statusCode, ContentType=$contentType, Size=${contentLength}bytes, Duration=${duration}ms" -Level Debug
+        # Try Invoke-WebRequest first for full response details
+        try {
+            $webResponse = Invoke-WebRequest -Uri $Url -Method Get -UserAgent $userAgent
+            $duration = ((Get-Date) - $startTime).TotalMilliseconds
 
-        # Get raw content
-        $rawContent = $webResponse.Content
+            $statusCode = $webResponse.StatusCode
+            $contentType = $webResponse.Headers['Content-Type']
+            $rawContent = $webResponse.Content
+
+            Write-Log -Message "Reddit API response: Status=$statusCode, ContentType=$contentType, Size=$($rawContent.Length)bytes, Duration=${duration}ms" -Level Debug
+        }
+        catch [System.ArgumentOutOfRangeException] {
+            # Invoke-WebRequest fails with ArgumentOutOfRangeException on some Reddit responses
+            # This is a known PowerShell Core bug with large Unicode content
+            # Fallback to Invoke-RestMethod which handles these cases better
+            Write-Log -Message "Invoke-WebRequest failed with ArgumentOutOfRangeException, falling back to Invoke-RestMethod" -Level Debug
+
+            try {
+                $restStartTime = Get-Date
+                $response = Invoke-RestMethod -Uri $Url -Method Get -UserAgent $userAgent
+                $duration = ((Get-Date) - $restStartTime).TotalMilliseconds
+
+                Write-Log -Message "Reddit API response (via RestMethod): Status=200, Duration=${duration}ms" -Level Debug
+                Write-Log -Message "JSON parsed successfully (via RestMethod fallback)" -Level Debug
+
+                # Log structure info
+                if ($response -is [array]) {
+                    Write-Log -Message "Response is array with $($response.Count) elements" -Level Debug
+                } elseif ($response.data) {
+                    $childCount = if ($response.data.children) { $response.data.children.Count } else { 0 }
+                    Write-Log -Message "Response has data property with $childCount children" -Level Debug
+                }
+
+                return $response
+            }
+            catch {
+                Write-Log -Message "Invoke-RestMethod also failed for: $Url" -Level Error -ErrorRecord $_
+                Write-Error "Failed to fetch Reddit data: $_"
+                return $null
+            }
+        }
 
         # Log first portion of response for debugging (truncate if too long)
-        $previewLength = [Math]::Min($rawContent.Length, 500)
-        $preview = $rawContent.Substring(0, $previewLength)
-        if ($rawContent.Length -gt 500) {
-            $preview += "... [truncated, total: $($rawContent.Length) chars]"
-        }
-        Write-Log -Message "Response preview: $preview" -Level Debug
-
-        # Check if content type indicates JSON
-        if ($contentType -and -not ($contentType -match 'application/json|text/json')) {
-            Write-Log -Message "Warning: Unexpected content type '$contentType' - expected JSON" -Level Warning
-        }
-
-        # Validate JSON and parse
-        try {
-            $response = $rawContent | ConvertFrom-Json
-            Write-Log -Message "JSON parsed successfully" -Level Debug
-
-            # Log structure info
-            if ($response -is [array]) {
-                Write-Log -Message "Response is array with $($response.Count) elements" -Level Debug
-            } elseif ($response.data) {
-                $childCount = if ($response.data.children) { $response.data.children.Count } else { 0 }
-                Write-Log -Message "Response has data property with $childCount children" -Level Debug
+        if ($rawContent) {
+            try {
+                $previewLength = [Math]::Min($rawContent.Length, 500)
+                $preview = $rawContent.Substring(0, $previewLength)
+                if ($rawContent.Length -gt 500) {
+                    $preview += "... [truncated, total: $($rawContent.Length) chars]"
+                }
+                Write-Log -Message "Response preview: $preview" -Level Debug
+            }
+            catch {
+                Write-Log -Message "Response size: $($rawContent.Length) chars (preview failed)" -Level Debug
             }
 
-            return $response
-        }
-        catch {
-            Write-Log -Message "Failed to parse JSON response from: $Url" -Level Error -ErrorRecord $_
-            Write-Log -Message "Invalid JSON content: $preview" -Level Error
-            Write-Error "Response is not valid JSON: $_"
-            return $null
+            # Check if content type indicates JSON
+            if ($contentType -and -not ($contentType -match 'application/json|text/json')) {
+                Write-Log -Message "Warning: Unexpected content type '$contentType' - expected JSON" -Level Warning
+            }
+
+            # Validate JSON and parse
+            try {
+                $response = $rawContent | ConvertFrom-Json
+                Write-Log -Message "JSON parsed successfully" -Level Debug
+
+                # Log structure info
+                if ($response -is [array]) {
+                    Write-Log -Message "Response is array with $($response.Count) elements" -Level Debug
+                } elseif ($response.data) {
+                    $childCount = if ($response.data.children) { $response.data.children.Count } else { 0 }
+                    Write-Log -Message "Response has data property with $childCount children" -Level Debug
+                }
+
+                return $response
+            }
+            catch {
+                Write-Log -Message "Failed to parse JSON response from: $Url" -Level Error -ErrorRecord $_
+                Write-Log -Message "Invalid JSON content: $preview" -Level Error
+                Write-Error "Response is not valid JSON: $_"
+                return $null
+            }
         }
     }
     catch {
-        Write-Log -Message "Failed to fetch Reddit data from: $Url" -Level Error -ErrorRecord $_
+        $errorContext = "URL: $Url"
+
+        # Add HTTP response details if available
+        if ($_.Exception.Response) {
+            $errorContext += " | HTTP Status: $($_.Exception.Response.StatusCode) $($_.Exception.Response.StatusDescription)"
+        }
+
+        # Add specific error type information
+        if ($_.Exception -is [System.Net.WebException]) {
+            $errorContext += " | Network Error: $($_.Exception.Status)"
+        }
+
+        Write-Log -Message "Failed to fetch Reddit data - $errorContext" -Level Error -ErrorRecord $_
         Write-Error "Failed to fetch Reddit data: $_"
         return $null
     }
@@ -308,7 +396,7 @@ function Get-RedditPosts {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('^[a-zA-Z0-9_-]+$')]
+        [ValidatePattern('^[a-zA-Z0-9_+\-]+$')]
         [string]$Subreddit,
 
         [Parameter(Mandatory = $false)]
@@ -317,23 +405,45 @@ function Get-RedditPosts {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('hour', 'day', 'week', 'month', 'year', 'all')]
-        [string]$Time = 'day'
+        [string]$Time = 'day',
+
+        [Parameter(Mandatory = $false)]
+        [string]$After
     )
 
-    Write-Log -Message "Getting posts from r/$Subreddit (sort: $Sort, time: $Time)" -Level Info
+    $isMultireddit = $Subreddit -match '\+'
+    Write-Log -Message "Getting posts from r/$Subreddit (sort: $Sort, time: $Time, after: $After, multireddit: $isMultireddit)" -Level Info
 
     $url = "https://www.reddit.com/r/$Subreddit/$Sort"
+    Write-Log -Message "Get-RedditPosts: base URL = $url" -Level Debug
 
     # Add time filter for 'top' sort
     if ($Sort -eq 'top') {
         $url += "?t=$Time"
+        Write-Log -Message "Get-RedditPosts: appended time filter, URL = $url" -Level Debug
     }
+
+    # Append pagination cursor
+    if ($After) {
+        $separator = if ($url -match '\?') { '&' } else { '?' }
+        $url += "${separator}after=$After"
+        Write-Log -Message "Get-RedditPosts: appended pagination cursor '$After', URL = $url" -Level Debug
+    }
+
+    Write-Log -Message "Get-RedditPosts: calling Get-RedditData with final URL = $url" -Level Debug
     $data = Get-RedditData -Url $url
+
+    # Capture pagination cursor
+    $script:AfterCursor = if ($data -and $data.data) { $data.data.after } else { $null }
+    Write-Log -Message "Get-RedditPosts: response received, data null=$($null -eq $data), AfterCursor=$($script:AfterCursor)" -Level Debug
 
     if ($data -and $data.data -and $data.data.children) {
         $postCount = $data.data.children.Count
-        Write-Log -Message "Retrieved $postCount posts from r/$Subreddit" -Level Debug
+        Write-Log -Message "Get-RedditPosts: retrieved $postCount posts from r/$Subreddit (after cursor: $($script:AfterCursor))" -Level Debug
+        $postIndex = 0
         return $data.data.children | ForEach-Object {
+            Write-Log -Message "Get-RedditPosts: post[$postIndex] title='$($_.data.title)' post_hint='$($_.data.post_hint)' is_video=$($_.data.is_video) subreddit=$($_.data.subreddit)" -Level Debug
+            $postIndex++
             [PSCustomObject]@{
                 Title = $_.data.title
                 Author = $_.data.author
@@ -346,10 +456,13 @@ function Get-RedditPosts {
                 SelfText = $_.data.selftext
                 IsLink = -not [string]::IsNullOrEmpty($_.data.url) -and $_.data.url -ne $_.data.permalink
                 LinkUrl = $_.data.url
+                PostHint = $_.data.post_hint
+                IsVideo = [bool]$_.data.is_video
             }
         }
     }
 
+    Write-Log -Message "Get-RedditPosts: no data returned for r/$Subreddit" -Level Warning
     return @()
 }
 
@@ -436,10 +549,13 @@ function Search-Reddit {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('hour', 'day', 'week', 'month', 'year', 'all')]
-        [string]$Time = 'all'
+        [string]$Time = 'all',
+
+        [Parameter(Mandatory = $false)]
+        [string]$After
     )
 
-    Write-Log -Message "Searching Reddit: '$Query' (subreddit: $Subreddit, sort: $Sort, time: $Time)" -Level Info
+    Write-Log -Message "Searching Reddit: '$Query' (subreddit: $Subreddit, sort: $Sort, time: $Time, after: $After)" -Level Info
 
     # URL encode the query
     $encodedQuery = [System.Web.HttpUtility]::UrlEncode($Query)
@@ -451,8 +567,16 @@ function Search-Reddit {
         $url = "https://www.reddit.com/search.json?q=$encodedQuery&sort=$Sort&t=$Time"
     }
 
+    # Append pagination cursor
+    if ($After) {
+        $url += "&after=$After"
+        Write-Log -Message "Search-Reddit: appended pagination cursor '$After'" -Level Debug
+    }
+
+    $ProgressPreference = 'SilentlyContinue'
+
     try {
-        Write-Log -Message "Search URL: $url" -Level Debug
+        Write-Log -Message "Search-Reddit: final URL = $url" -Level Debug
 
         # Use module version for User-Agent
         $moduleVersion = $MyInvocation.MyCommand.Module.Version
@@ -464,9 +588,13 @@ function Search-Reddit {
 
         Write-Log -Message "Search completed in ${duration}ms" -Level Debug
 
+        # Capture pagination cursor
+        $script:AfterCursor = if ($response -and $response.data) { $response.data.after } else { $null }
+        Write-Log -Message "Search-Reddit: response received, data null=$($null -eq $response), AfterCursor=$($script:AfterCursor)" -Level Debug
+
         if ($response -and $response.data -and $response.data.children) {
             $resultCount = $response.data.children.Count
-            Write-Log -Message "Search returned $resultCount results" -Level Info
+            Write-Log -Message "Search-Reddit: returned $resultCount results (after cursor: $($script:AfterCursor))" -Level Info
 
             return $response.data.children | ForEach-Object {
                 [PSCustomObject]@{
@@ -481,6 +609,8 @@ function Search-Reddit {
                     SelfText = $_.data.selftext
                     IsLink = -not [string]::IsNullOrEmpty($_.data.url) -and $_.data.url -ne $_.data.permalink
                     LinkUrl = $_.data.url
+                    PostHint = $_.data.post_hint
+                    IsVideo = [bool]$_.data.is_video
                 }
             }
         }
@@ -744,13 +874,17 @@ function Show-RedditTUI {
     .SYNOPSIS
         Launches the Terminal UI for browsing Reddit
     .DESCRIPTION
-        Opens an interactive Terminal UI using Terminal.Gui for browsing Reddit with a favorites sidebar
+        Opens an interactive Terminal UI using Terminal.Gui for browsing Reddit with emoji icons and a favorites sidebar.
+
+        Uses the default ConsoleDriver with full emoji support (⬆ 💬 📍 👤 📝 🔗) for best compatibility.
     .PARAMETER InitialSubreddit
         The subreddit to load initially (default: "popular")
     .EXAMPLE
         Show-RedditTUI
+        Launches the TUI with the popular subreddit
     .EXAMPLE
         Show-RedditTUI -InitialSubreddit "powershell"
+        Launches the TUI with the PowerShell subreddit
     #>
     [CmdletBinding()]
     param(
@@ -758,7 +892,11 @@ function Show-RedditTUI {
         [string]$InitialSubreddit = "popular"
     )
     
+    $moduleVersion = (Get-Module PSRedditTUI).Version
     Write-Log -Message "Show-RedditTUI starting with initial subreddit: $InitialSubreddit" -Level Info
+    Write-Log -Message "Debug log file: $script:LogFile" -Level Info
+    Write-Log -Message "PowerShell version: $($PSVersionTable.PSVersion) OS: $($PSVersionTable.OS)" -Level Debug
+    Write-Verbose "PSRedditTUI debug log: $script:LogFile"
 
     # Check if Terminal.Gui is available
     try {
@@ -774,9 +912,20 @@ function Show-RedditTUI {
     # Load favorites
     Get-Favorites | Out-Null
 
-    # Initialize Terminal.Gui
-    Write-Log -Message "Initializing Terminal.Gui Application" -Level Debug
+    # Initialize Terminal.Gui with default driver
+    # Check if Application is already initialized and shut it down first
+    if ($null -ne [Terminal.Gui.Application]::Driver) {
+        Write-Log -Message "Application already initialized, shutting down to reinitialize" -Level Debug
+        [Terminal.Gui.Application]::Shutdown()
+    }
+
+    # Always use emojis - they work fine in modern terminals without NetDriver
+    # NetDriver causes freezing issues, so we use the default ConsoleDriver instead
+    $script:UsingSystemConsole = $true
+
+    Write-Log -Message "Initializing Terminal.Gui Application with default ConsoleDriver" -Level Debug
     [Terminal.Gui.Application]::Init()
+    Write-Log -Message "Terminal.Gui initialized successfully with emoji support" -Level Info
 
     try {
         # Create main window
@@ -788,8 +937,8 @@ function Show-RedditTUI {
         $win.Y = 0
         $win.Width  = [Terminal.Gui.Dim]::Fill()
         $win.Height = [Terminal.Gui.Dim]::Fill()
-        
-        
+
+
         # Create menu bar
         $menu = [Terminal.Gui.MenuBar]::new(@(
             [Terminal.Gui.MenuBarItem]::new("_File", @(
@@ -797,7 +946,7 @@ function Show-RedditTUI {
             )),
             [Terminal.Gui.MenuBarItem]::new("_Help", @(
                 [Terminal.Gui.MenuItem]::new("_About", "About PSRedditTUI", {
-                    [Terminal.Gui.MessageBox]::Query("About", "PSRedditTUI v1.0`nA PowerShell Reddit Terminal Browser`nPress ESC to close", @("OK"))
+                    [Terminal.Gui.MessageBox]::Query("About", "PSRedditTUI v$moduleVersion`nA PowerShell Reddit Terminal Browser`nPress ESC to close", @("OK"))
                 })
             ))
         ))
@@ -994,13 +1143,23 @@ function Show-RedditTUI {
         $contentFrame.Add($searchGlobalCheck)
 
         # Posts list view (moved to Y=4 for search row)
+        Write-Log -Message "TUI: Creating postsListView at Y=4, Height=Fill(1) to leave room for Load More button" -Level Debug
         $postsListView = [Terminal.Gui.ListView]::new()
         $postsListView.X = 0
         $postsListView.Y = 4
         $postsListView.Width = [Terminal.Gui.Dim]::Fill()
-        $postsListView.Height = [Terminal.Gui.Dim]::Fill()
-
+        $postsListView.Height = [Terminal.Gui.Dim]::Fill(1)
         $contentFrame.Add($postsListView)
+
+        # Load More button (hidden by default)
+        Write-Log -Message "TUI: Creating Load More button (hidden by default)" -Level Debug
+        $loadMoreBtn = [Terminal.Gui.Button]::new()
+        $loadMoreBtn.Text = "Load More..."
+        $loadMoreBtn.X = [Terminal.Gui.Pos]::Center()
+        $loadMoreBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
+        $loadMoreBtn.Visible = $false
+        $contentFrame.Add($loadMoreBtn)
+        Write-Log -Message "TUI: Load More button added to contentFrame" -Level Debug
 
         # Store current posts for click handling
         $script:CurrentPosts = @()
@@ -1018,11 +1177,11 @@ function Show-RedditTUI {
                 if ($currentDepth -gt $maxDepth) { return }
 
                 $indent = "  " * $comment.Depth
-                $opTag = if ($comment.IsOP) { " 🎤" } else { "" }
+                $opTag = if ($comment.IsOP) { " [OP]" } else { "" }
                 $scoreStr = if ($comment.Score -ge 0) { "+$($comment.Score)" } else { "$($comment.Score)" }
 
                 # Author line
-                $lines.Add("$indent⬆$scoreStr 👤 u/$($comment.Author)$opTag")
+                $lines.Add("${indent}[$scoreStr] u/$($comment.Author)$opTag")
 
                 # Body - wrap long lines
                 $bodyLines = $comment.Body -split "`n"
@@ -1068,16 +1227,29 @@ function Show-RedditTUI {
         $showPostDetail = {
             param($post)
 
+            # Copy parent-scope refs into locals so .GetNewClosure() captures them
+            $listView = $postsListView
+            $logFile = $script:LogFile
+
             Write-Log -Message "TUI: Opening post detail for: $($post.Title)" -Level Info
 
             # Create dialog
-            $dialog = [Terminal.Gui.Dialog]::new()
-            $dialog.Title = "Post Details (ESC to close)"
+            # Use Window instead of Dialog to avoid ESC closing the entire app
+            $dialog = [Terminal.Gui.Window]::new("Post Details (ESC to close)")
+            $dialog.X = [Terminal.Gui.Pos]::Center()
+            $dialog.Y = [Terminal.Gui.Pos]::Center()
             $dialog.Width = [Terminal.Gui.Dim]::Percent(90)
             $dialog.Height = [Terminal.Gui.Dim]::Percent(90)
+            $dialog.Modal = $true
 
             # Post header info
-            $headerText = "📍 r/$($post.Subreddit) │ 👤 u/$($post.Author) │ ⬆ $($post.Score) │ 💬 $($post.NumComments)"
+            # Use emojis when NetDriver (UseSystemConsole) is enabled for better Unicode support
+            $locationIcon = if ($script:UsingSystemConsole) { "📍" } else { "@" }
+            $userIcon = if ($script:UsingSystemConsole) { "👤" } else { "u" }
+            $upvoteIcon = if ($script:UsingSystemConsole) { "⬆" } else { "^" }
+            $commentIcon = if ($script:UsingSystemConsole) { "💬" } else { "#" }
+
+            $headerText = "$locationIcon r/$($post.Subreddit) | $userIcon u/$($post.Author) | $upvoteIcon $($post.Score) | $commentIcon $($post.NumComments)"
             $headerLabel = [Terminal.Gui.Label]::new()
             $headerLabel.Text = $headerText
             $headerLabel.X = 1
@@ -1152,20 +1324,34 @@ function Show-RedditTUI {
             $closeBtn.Text = "Close (ESC)"
             $closeBtn.X = [Terminal.Gui.Pos]::Center() + 8
             $closeBtn.Y = [Terminal.Gui.Pos]::AnchorEnd(1)
-            $closeBtn.add_Clicked({ [Terminal.Gui.Application]::RequestStop() })
+            $closeBtn.add_Clicked({
+                $top = [Terminal.Gui.Application]::Top
+                $top.Remove($dialog)
+                $listView.SetFocus()
+            }.GetNewClosure())
             $dialog.Add($closeBtn)
 
-            # Handle O key to open in browser
+            # Handle O key to open in browser and ESC to close
+            # Terminal.Gui v1.x passes KeyEventEventArgs; key is at .KeyEvent.Key
             $dialog.add_KeyPress({
                 param($keyEvent)
-                # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-                if ($null -ne $keyEvent.Key) {
-                    $key = $keyEvent.Key.ToString()
-                    if ($key -eq 'O' -or $key -eq 'o') {
-                        $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
-                        Start-Process $urlToOpen
-                        $keyEvent.Handled = $true
-                    }
+                if ($null -eq $keyEvent) { return }
+                # Resolve the Key from either .KeyEvent.Key or .Key depending on TG version
+                $k = $null
+                if ($null -ne $keyEvent.KeyEvent) { $k = $keyEvent.KeyEvent.Key }
+                elseif ($null -ne $keyEvent.Key) { $k = $keyEvent.Key }
+                if ($null -eq $k) { return }
+                $key = $k.ToString()
+                if ($key -eq 'Esc' -or $key -eq 'Escape') {
+                    $top = [Terminal.Gui.Application]::Top
+                    $top.Remove($dialog)
+                    $listView.SetFocus()
+                    $keyEvent.Handled = $true
+                }
+                elseif ($key -eq 'O' -or $key -eq 'o') {
+                    $urlToOpen = if ($post.IsLink) { $post.LinkUrl } else { $post.Url }
+                    Start-Process $urlToOpen
+                    $keyEvent.Handled = $true
                 }
             }.GetNewClosure())
 
@@ -1179,23 +1365,20 @@ function Show-RedditTUI {
                     $newContent = [System.Collections.Generic.List[string]]::new()
 
                     if (-not [string]::IsNullOrWhiteSpace($post.SelfText)) {
-                        $newContent.Add("📝 POST CONTENT")
-                        $newContent.Add("─────────────────────────────────────────")
+                        $newContent.Add("--- POST CONTENT ---")
                         $newContent.Add("")
                         foreach ($line in ($post.SelfText -split "`n")) {
                             $newContent.Add($line)
                         }
                         $newContent.Add("")
-                        $newContent.Add("💬 COMMENTS ($($comments.Count) loaded)")
-                        $newContent.Add("─────────────────────────────────────────")
+                        $newContent.Add("--- COMMENTS ($($comments.Count)) ---")
                         $newContent.Add("")
                     } else {
                         if ($post.IsLink) {
-                            $newContent.Add("🔗 Link: $($post.LinkUrl)")
+                            $newContent.Add("Link: $($post.LinkUrl)")
                             $newContent.Add("")
                         }
-                        $newContent.Add("💬 COMMENTS ($($comments.Count) loaded)")
-                        $newContent.Add("─────────────────────────────────────────")
+                        $newContent.Add("--- COMMENTS ($($comments.Count)) ---")
                         $newContent.Add("")
                     }
 
@@ -1212,24 +1395,52 @@ function Show-RedditTUI {
                     Write-Log -Message "TUI: Displayed $($comments.Count) comments" -Level Debug
                 }
                 catch {
-                    Write-Log -Message "TUI: Failed to load comments for: $($post.Permalink)" -Level Error -ErrorRecord $_
-                    $contentView.Text = "Failed to load comments: $_"
+                    $errorDetails = "permalink=$($post.Permalink)"
+                    $errorDetails += " | Exception: $($_.Exception.GetType().Name)"
+                    if ($_.Exception.Message) {
+                        $errorDetails += " | Message: $($_.Exception.Message)"
+                    }
+                    if ($_.Exception.InnerException) {
+                        $errorDetails += " | Inner: $($_.Exception.InnerException.Message)"
+                    }
+                    Write-Log -Message "TUI: Failed to load comments - $errorDetails" -Level Error -ErrorRecord $_
+                    $contentView.Text = "Failed to load comments: $($_.Exception.Message)`n`nCheck the log file for more details: Get-PSRedditTUILog"
                 }
             }
 
             # Fetch comments before showing dialog
             & $loadCommentsAction
 
-            # Show dialog
+            # Show dialog - Don't use Application.Run() from within event handler as it creates nested event loop
+            # Instead, add to top and set focus, letting main loop handle it
             Write-Log -Message "TUI: About to show post detail dialog" -Level Debug
             Write-Log -Message "TUI: Dialog object null check: $($null -ne $dialog)" -Level Debug
             try {
-                [Terminal.Gui.Application]::Run($dialog)
-                Write-Log -Message "TUI: Post detail dialog closed normally" -Level Debug
+                $top = [Terminal.Gui.Application]::Top
+                Write-Log -Message "TUI: top null check: $($null -ne $top)" -Level Debug
+                $top.Add($dialog)
+                Write-Log -Message "TUI: Dialog added to top" -Level Debug
+                $dialog.SetFocus()
+                Write-Log -Message "TUI: Focus set on dialog" -Level Debug
             }
             catch {
-                Write-Log -Message "TUI: CRASH - Failed to run post detail dialog" -Level Error -ErrorRecord $_
+                Write-Log -Message "TUI: CRASH - Failed to show post detail dialog" -Level Error -ErrorRecord $_
                 throw
+            }
+        }
+
+        # Function to get post type tag from post_hint/is_video
+        # Uses short ASCII tags that render reliably in Terminal.Gui
+        $getTypeTag = {
+            param($post)
+            if ($post.IsVideo) { return '[vid]' }
+            switch ($post.PostHint) {
+                'image'         { return '[img]' }
+                'hosted:video'  { return '[vid]' }
+                'rich:video'    { return '[vid]' }
+                'link'          { return '[lnk]' }
+                'self'          { return '[txt]' }
+                default         { return '[txt]' }
             }
         }
 
@@ -1238,37 +1449,63 @@ function Show-RedditTUI {
             param($subreddit)
 
             $script:IsSearchResults = $false
+            $script:AfterCursor = $null
             $sort = $script:CurrentSort
             $time = $script:CurrentTime
 
             Write-Log -Message "TUI: Loading posts for r/$subreddit (sort: $sort, time: $time)" -Level Info
 
             try {
+                Write-Log -Message "TUI: loadPosts started for r/$subreddit" -Level Debug
                 $sortInfo = if ($sort -eq 'top') { "$sort/$time" } else { $sort }
                 $contentFrame.Title = "r/$subreddit/$sortInfo (Loading...)"
-                [Terminal.Gui.Application]::Refresh()
+                Write-Log -Message "TUI: Title updated to show Loading message" -Level Debug
+                # Don't call Application.Refresh() here - it causes deadlocks with NetDriver in event handler context
+                # The UI will update automatically on the next event loop iteration
 
                 $script:CurrentPosts = Get-RedditPosts -Subreddit $subreddit -Sort $sort -Time $time -ErrorAction Stop
+                Write-Log -Message "TUI: API call completed, building posts list" -Level Debug
 
                 $postsList = [System.Collections.Generic.List[string]]::new()
+
                 foreach ($post in $script:CurrentPosts) {
-                    $score = $post.Score.ToString().PadLeft(5)
+                    $tag = & $getTypeTag $post
+                    $score = $post.Score.ToString().PadLeft(6)
                     $comments = $post.NumComments.ToString().PadLeft(4)
                     $title = $post.Title
-                    if ($title.Length -gt 80) {
-                        # Truncate to 77 characters + "..." (3 chars) = 80 total
-                        $title = $title.Substring(0, 77) + "..."
+                    if ($title.Length -gt 75) {
+                        $title = $title.Substring(0, 72) + "..."
                     }
-                    $postsList.Add("⬆$score 💬$comments │ $title")
+                    $postsList.Add("$tag $score ^  $comments # | $title")
                 }
 
+                Write-Log -Message "TUI: About to call SetSource with $($postsList.Count) items" -Level Debug
                 $postsListView.SetSource($postsList)
+                Write-Log -Message "TUI: SetSource completed successfully" -Level Debug
+
                 $contentFrame.Title = "r/$subreddit/$sortInfo - $($script:CurrentPosts.Count) posts (Enter=view, O=open)"
                 Write-Log -Message "TUI: Displayed $($script:CurrentPosts.Count) posts for r/$subreddit" -Level Debug
+
+                # Show/hide Load More button based on pagination cursor
+                $hasMore = [bool]$script:AfterCursor
+                Write-Log -Message "TUI: loadPosts: AfterCursor='$($script:AfterCursor)' hasMore=$hasMore, showing Load More button=$hasMore" -Level Debug
+                $loadMoreBtn.Visible = $hasMore
+
+                # Set focus to posts list to ensure it's interactive
+                Write-Log -Message "TUI: About to call SetFocus on posts list" -Level Debug
+                $postsListView.SetFocus()
+                Write-Log -Message "TUI: SetFocus completed, loadPosts finished successfully" -Level Debug
             }
             catch {
-                Write-Log -Message "TUI: Failed to load r/$subreddit (sort: $sort, time: $time)" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load subreddit: $_", @("OK"))
+                $errorDetails = "subreddit=r/$subreddit, sort=$sort, time=$time"
+                $errorDetails += " | Exception: $($_.Exception.GetType().Name)"
+                if ($_.Exception.Message) {
+                    $errorDetails += " | Message: $($_.Exception.Message)"
+                }
+                Write-Log -Message "TUI: Failed to load posts - $errorDetails" -Level Error -ErrorRecord $_
+
+                $userMessage = "Failed to load subreddit: $($_.Exception.Message)"
+                [Terminal.Gui.MessageBox]::ErrorQuery("Error", $userMessage, @("OK"))
                 $contentFrame.Title = "r/$subreddit (Error)"
             }
         }
@@ -1278,8 +1515,13 @@ function Show-RedditTUI {
             param($query, $subreddit, $globalSearch)
 
             $script:IsSearchResults = $true
+            $script:AfterCursor = $null
+            $script:LastSearchQuery = $query
+            $script:LastSearchSubreddit = $subreddit
+            $script:LastSearchGlobal = $globalSearch
 
-            Write-Log -Message "TUI: Searching for '$query' (global: $globalSearch, subreddit: $subreddit)" -Level Info
+            Write-Log -Message "TUI: searchPosts: query='$query' global=$globalSearch subreddit='$subreddit'" -Level Info
+            Write-Log -Message "TUI: searchPosts: reset AfterCursor to null, stored search params for pagination replay" -Level Debug
 
             try {
                 $searchScope = if ($globalSearch) { "All Reddit" } else { "r/$subreddit" }
@@ -1293,26 +1535,42 @@ function Show-RedditTUI {
                 }
 
                 $postsList = [System.Collections.Generic.List[string]]::new()
+
                 foreach ($post in $script:CurrentPosts) {
-                    $score = $post.Score.ToString().PadLeft(5)
+                    $tag = & $getTypeTag $post
+                    $score = $post.Score.ToString().PadLeft(6)
                     $comments = $post.NumComments.ToString().PadLeft(4)
                     $sub = $post.Subreddit
                     $title = $post.Title
-                    # Shorter title for search results to show subreddit
-                    if ($title.Length -gt 60) {
-                        $title = $title.Substring(0, 57) + "..."
+                    if ($title.Length -gt 55) {
+                        $title = $title.Substring(0, 52) + "..."
                     }
-                    $postsList.Add("⬆$score 💬$comments │ r/$sub │ $title")
+                    $postsList.Add("$tag $score ^  $comments # | r/$sub | $title")
                 }
 
                 $postsListView.SetSource($postsList)
                 $resultScope = if ($globalSearch) { "Reddit" } else { "r/$subreddit" }
                 $contentFrame.Title = "Search '$query' in $resultScope - $($script:CurrentPosts.Count) results (Enter=view, O=open)"
                 Write-Log -Message "TUI: Search returned $($script:CurrentPosts.Count) results" -Level Debug
+
+                # Show/hide Load More button based on pagination cursor
+                $hasMore = [bool]$script:AfterCursor
+                Write-Log -Message "TUI: searchPosts: AfterCursor='$($script:AfterCursor)' hasMore=$hasMore, showing Load More button=$hasMore" -Level Debug
+                $loadMoreBtn.Visible = $hasMore
             }
             catch {
-                Write-Log -Message "TUI: Search failed for '$query' (global: $globalSearch, subreddit: $subreddit)" -Level Error -ErrorRecord $_
-                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Search failed: $_", @("OK"))
+                $errorDetails = "query='$query', global=$globalSearch"
+                if (-not $globalSearch) {
+                    $errorDetails += ", subreddit=$subreddit"
+                }
+                $errorDetails += " | Exception: $($_.Exception.GetType().Name)"
+                if ($_.Exception.Message) {
+                    $errorDetails += " | Message: $($_.Exception.Message)"
+                }
+                Write-Log -Message "TUI: Search failed - $errorDetails" -Level Error -ErrorRecord $_
+
+                $userMessage = "Search failed: $($_.Exception.Message)"
+                [Terminal.Gui.MessageBox]::ErrorQuery("Error", $userMessage, @("OK"))
                 $contentFrame.Title = "Search Error"
             }
         }
@@ -1333,6 +1591,85 @@ function Show-RedditTUI {
             catch {
                 Write-Log -Message "TUI: Failed to search" -Level Error -ErrorRecord $_
                 [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to search: $_", @("OK"))
+            }
+        })
+
+        # Load More button click event
+        $loadMoreBtn.add_Clicked({
+            try {
+                $cursor = $script:AfterCursor
+                Write-Log -Message "TUI: LoadMore: clicked, cursor='$cursor' IsSearchResults=$($script:IsSearchResults)" -Level Debug
+                if (-not $cursor) {
+                    Write-Log -Message "TUI: LoadMore: no cursor available, returning early" -Level Debug
+                    return
+                }
+
+                Write-Log -Message "TUI: LoadMore: fetching next page with cursor='$cursor'" -Level Info
+
+                if ($script:IsSearchResults) {
+                    # Paginate search results
+                    $q = $script:LastSearchQuery
+                    $sub = $script:LastSearchSubreddit
+                    $global = $script:LastSearchGlobal
+                    Write-Log -Message "TUI: LoadMore: search pagination - query='$q' subreddit='$sub' global=$global" -Level Debug
+
+                    if ($global) {
+                        $newPosts = Search-Reddit -Query $q -After $cursor -ErrorAction Stop
+                    } else {
+                        $newPosts = Search-Reddit -Query $q -Subreddit $sub -After $cursor -ErrorAction Stop
+                    }
+                } else {
+                    # Paginate subreddit posts
+                    $sub = $subredditInput.Text.ToString().Trim()
+                    $sort = $script:CurrentSort
+                    $time = $script:CurrentTime
+                    Write-Log -Message "TUI: LoadMore: subreddit pagination - sub='$sub' sort=$sort time=$time" -Level Debug
+                    $newPosts = Get-RedditPosts -Subreddit $sub -Sort $sort -Time $time -After $cursor -ErrorAction Stop
+                }
+
+                $newCount = if ($newPosts) { @($newPosts).Count } else { 0 }
+                Write-Log -Message "TUI: LoadMore: API returned $newCount new posts, new AfterCursor='$($script:AfterCursor)'" -Level Debug
+
+                if ($newPosts -and $newCount -gt 0) {
+                    $prevCount = $script:CurrentPosts.Count
+                    $script:CurrentPosts = @($script:CurrentPosts) + @($newPosts)
+                    Write-Log -Message "TUI: LoadMore: appended $newCount posts ($prevCount -> $($script:CurrentPosts.Count) total)" -Level Debug
+
+                    # Rebuild the list view
+                    $postsList = [System.Collections.Generic.List[string]]::new()
+
+                    foreach ($post in $script:CurrentPosts) {
+                        $tag = & $getTypeTag $post
+                        $score = $post.Score.ToString().PadLeft(6)
+                        $comments = $post.NumComments.ToString().PadLeft(4)
+
+                        if ($script:IsSearchResults) {
+                            $sub = $post.Subreddit
+                            $title = $post.Title
+                            if ($title.Length -gt 55) { $title = $title.Substring(0, 52) + "..." }
+                            $postsList.Add("$tag $score ^  $comments # | r/$sub | $title")
+                        } else {
+                            $title = $post.Title
+                            if ($title.Length -gt 75) { $title = $title.Substring(0, 72) + "..." }
+                            $postsList.Add("$tag $score ^  $comments # | $title")
+                        }
+                    }
+
+                    Write-Log -Message "TUI: LoadMore: rebuilding ListView with $($postsList.Count) items" -Level Debug
+                    $postsListView.SetSource($postsList)
+                    Write-Log -Message "TUI: LoadMore: ListView updated" -Level Debug
+                } else {
+                    Write-Log -Message "TUI: LoadMore: no new posts returned" -Level Debug
+                }
+
+                # Show/hide button based on new cursor
+                $hasMore = [bool]$script:AfterCursor
+                Write-Log -Message "TUI: LoadMore: done, new AfterCursor='$($script:AfterCursor)' hasMore=$hasMore" -Level Debug
+                $loadMoreBtn.Visible = $hasMore
+            }
+            catch {
+                Write-Log -Message "TUI: Load More failed" -Level Error -ErrorRecord $_
+                [Terminal.Gui.MessageBox]::ErrorQuery("Error", "Failed to load more: $($_.Exception.Message)", @("OK"))
             }
         })
 
@@ -1363,17 +1700,19 @@ function Show-RedditTUI {
         # Key press handler for posts list (O to open in browser)
         $postsListView.add_KeyPress({
             param($keyEvent)
-            # Check for 'O' or 'o' key (Terminal.Gui v2.x uses Key enum)
-            if ($null -ne $keyEvent.Key) {
-                $key = $keyEvent.Key.ToString()
-                if ($key -eq 'O' -or $key -eq 'o') {
-                    $selected = $postsListView.SelectedItem
-                    if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
-                        $selectedPost = $script:CurrentPosts[$selected]
-                        $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
-                        Start-Process $urlToOpen
-                        $keyEvent.Handled = $true
-                    }
+            if ($null -eq $keyEvent) { return }
+            $k = $null
+            if ($null -ne $keyEvent.KeyEvent) { $k = $keyEvent.KeyEvent.Key }
+            elseif ($null -ne $keyEvent.Key) { $k = $keyEvent.Key }
+            if ($null -eq $k) { return }
+            $key = $k.ToString()
+            if ($key -eq 'O' -or $key -eq 'o') {
+                $selected = $postsListView.SelectedItem
+                if ($selected -ge 0 -and $selected -lt $script:CurrentPosts.Count) {
+                    $selectedPost = $script:CurrentPosts[$selected]
+                    $urlToOpen = if ($selectedPost.IsLink) { $selectedPost.LinkUrl } else { $selectedPost.Url }
+                    Start-Process $urlToOpen
+                    $keyEvent.Handled = $true
                 }
             }
         }.GetNewClosure())
@@ -1402,6 +1741,7 @@ function Show-RedditTUI {
                     Write-Log -Message "TUI: Favorite selected: $fav" -Level Debug
                     $subredditInput.Text = $fav
                     & $loadPosts $fav
+                    Write-Log -Message "TUI: Favorite selection complete" -Level Debug
                 }
             }
             catch {
@@ -1459,6 +1799,22 @@ function Show-RedditTUI {
         $win.Add($contentFrame)
         $top.Add($win)
 
+        # Create status bar with keyboard shortcut hints
+        # Use [Terminal.Gui.Key]0 for display-only hints to avoid CLS casing
+        # ambiguity (Terminal.Gui Key enum has both upper and lower letter variants)
+        Write-Log -Message "TUI: Creating StatusBar with shortcut hints" -Level Debug
+        $ctrlQ = [Terminal.Gui.Key]([uint32][Terminal.Gui.Key]::CtrlMask -bor [uint32][char]'q')
+        Write-Log -Message "TUI: StatusBar: Ctrl+Q key value = $([int]$ctrlQ)" -Level Debug
+        $statusBar = [Terminal.Gui.StatusBar]::new(@(
+            [Terminal.Gui.StatusItem]::new(([Terminal.Gui.Key]0), "~Enter~ View", $null),
+            [Terminal.Gui.StatusItem]::new(([Terminal.Gui.Key]0), "~O~ Open", $null),
+            [Terminal.Gui.StatusItem]::new(([Terminal.Gui.Key]0), "~Tab~ Navigate", $null),
+            [Terminal.Gui.StatusItem]::new($ctrlQ, "~^Q~ Quit", { [Terminal.Gui.Application]::RequestStop() })
+        ))
+        Write-Log -Message "TUI: StatusBar created with 4 items, adding to top" -Level Debug
+        $top.Add($statusBar)
+        Write-Log -Message "TUI: StatusBar added to top" -Level Debug
+
         # Load initial subreddit
         & $loadPosts $InitialSubreddit
 
@@ -1472,15 +1828,29 @@ function Show-RedditTUI {
             Write-Log -Message "TUI: Application.Run() returned normally" -Level Debug
         }
         catch {
-            Write-Log -Message "TUI: CRASH - Exception caught at Application.Run() level" -Level Error
-            Write-Log -Message "TUI: CRASH - Application.Run() threw exception" -Level Error -ErrorRecord $_
+            $errorMsg = "TUI: CRASH - Exception in Application.Run()"
+            $errorMsg += " | Exception Type: $($_.Exception.GetType().FullName)"
+            $errorMsg += " | Message: $($_.Exception.Message)"
+            if ($_.Exception.InnerException) {
+                $errorMsg += " | Inner Exception: $($_.Exception.InnerException.GetType().FullName)"
+                $errorMsg += " | Inner Message: $($_.Exception.InnerException.Message)"
+            }
+            Write-Log -Message $errorMsg -Level Error -ErrorRecord $_
             throw
         }
 
         Write-Log -Message "TUI: Application main loop ended normally" -Level Debug
     }
     catch {
-        Write-Log -Message "TUI: Unhandled exception in application" -Level Error -ErrorRecord $_
+        $errorMsg = "TUI: Unhandled exception in application"
+        $errorMsg += " | Exception Type: $($_.Exception.GetType().FullName)"
+        $errorMsg += " | Message: $($_.Exception.Message)"
+        if ($_.Exception.InnerException) {
+            $errorMsg += " | Inner Exception: $($_.Exception.InnerException.GetType().FullName)"
+            $errorMsg += " | Inner Message: $($_.Exception.InnerException.Message)"
+        }
+        Write-Log -Message $errorMsg -Level Error -ErrorRecord $_
+        Write-Host "`nAn error occurred in PSRedditTUI. Check the log for details: Get-PSRedditTUILog -Tail 50" -ForegroundColor Red
         throw
     }
     finally {
@@ -1510,12 +1880,12 @@ function Install-PSRedditTUITerminalGui {
     .PARAMETER Version
         The Terminal.Gui version to install (default: 1.16.0 - same as Microsoft.PowerShell.ConsoleGuiTools)
     .PARAMETER NStackVersion
-        The NStack.Core version to install (default: 1.0.0 - compatible with Terminal.Gui 1.16.0)
+        The NStack.Core version to install (default: 1.1.1 - required by Terminal.Gui 1.16.0)
     .PARAMETER Force
         Force reinstallation even if Terminal.Gui is already installed
     .EXAMPLE
         Install-PSRedditTUITerminalGui
-        Installs Terminal.Gui 1.16.0 and NStack.Core 1.0.0 to the local package directory
+        Installs Terminal.Gui 1.16.0 and NStack.Core 1.1.1 to the local package directory
     .EXAMPLE
         Install-PSRedditTUITerminalGui -Version "1.16.0" -Force
         Forces reinstallation of Terminal.Gui 1.16.0 and NStack.Core
@@ -1526,7 +1896,7 @@ function Install-PSRedditTUITerminalGui {
         [string]$Version = "1.16.0",
 
         [Parameter(Mandatory = $false)]
-        [string]$NStackVersion = "1.0.0",
+        [string]$NStackVersion = "1.1.1",
 
         [Parameter(Mandatory = $false)]
         [switch]$Force
@@ -1536,8 +1906,23 @@ function Install-PSRedditTUITerminalGui {
         $packageDir = Join-Path $HOME ".psreddittui-packages"
         $terminalGuiExtractPath = Join-Path $packageDir "Terminal.Gui"
         $nstackExtractPath = Join-Path $packageDir "NStack.Core"
-        $terminalGuiDllPath = Join-Path $terminalGuiExtractPath "lib/net8.0/Terminal.Gui.dll"
         $nstackDllPath = Join-Path $nstackExtractPath "lib/netstandard2.0/NStack.dll"
+
+        # Try to find Terminal.Gui.dll in order of preference: net8.0, net7.0, netstandard2.1
+        $terminalGuiDllPath = $null
+        $possiblePaths = @(
+            "lib/net8.0/Terminal.Gui.dll",
+            "lib/net7.0/Terminal.Gui.dll",
+            "lib/netstandard2.1/Terminal.Gui.dll"
+        )
+
+        foreach ($path in $possiblePaths) {
+            $fullPath = Join-Path $terminalGuiExtractPath $path
+            if (Test-Path $fullPath) {
+                $terminalGuiDllPath = $fullPath
+                break
+            }
+        }
 
         # Check if already installed (skip if -Force)
         if (-not $Force) {
@@ -1649,11 +2034,11 @@ function Install-PSRedditTUITerminalGui {
         Expand-Archive -Path $terminalGuiZipPath -DestinationPath $terminalGuiExtractPath -Force
         Remove-Item -Path $terminalGuiZipPath -Force -ErrorAction SilentlyContinue
 
-        # Find Terminal.Gui.dll - prefer net8.0 for PowerShell 7.4+
-        if (-not (Test-Path $terminalGuiDllPath)) {
-            Write-Log -Message "net8.0 Terminal.Gui.dll not found, searching for alternatives..." -Level Debug
+        # Find Terminal.Gui.dll - try preferred paths in order
+        if (-not $terminalGuiDllPath -or -not (Test-Path $terminalGuiDllPath)) {
+            Write-Log -Message "Searching for Terminal.Gui.dll in extracted package..." -Level Debug
             $terminalGuiDllPath = Get-ChildItem -Path $terminalGuiExtractPath -Recurse -Filter "Terminal.Gui.dll" |
-                                  Where-Object { $_.FullName -match 'net[78]' } |
+                                  Where-Object { $_.FullName -match 'net[78]|netstandard' } |
                                   Select-Object -First 1 -ExpandProperty FullName
         }
 

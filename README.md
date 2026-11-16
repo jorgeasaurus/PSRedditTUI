@@ -19,7 +19,7 @@ A PowerShell module for browsing Reddit in a Terminal UI (TUI)
 - 💬 **View Comments**: Read post content and comments directly in the terminal
 - 🌐 **Open in Browser**: Press `O` to open any post in your default browser
 - 📝 **Comprehensive Logging**: Built-in logging for debugging and troubleshooting
-- 🚀 **Reddit JSON API**: No authentication required for public subreddits
+- 🚀 **Reddit JSON API**: Public subreddits, with optional app-only OAuth when Reddit blocks anonymous requests
 - 🔄 **Cross-Platform**: Works on Windows, macOS, and Linux with PowerShell 7+
 
 ## Requirements
@@ -63,6 +63,25 @@ Install-PSRedditTUITerminalGui
 Import-Module ./PSRedditTUI.psd1
 Show-RedditTUI
 ```
+
+### Reddit API access (if you see HTTP 403)
+
+Reddit blocks many unauthenticated requests. If loading a subreddit fails with
+*"Reddit blocked this unauthenticated request (HTTP 403)"*, register a free app and give the module its client ID:
+
+1. Go to <https://www.reddit.com/prefs/apps> and click **create another app**.
+2. Pick **installed app**, give it any name, and set the redirect URI to `http://localhost`.
+3. Copy the client ID shown under the app name, then run:
+
+```powershell
+Set-RedditCredential -ClientId 'your-client-id' -Username 'your-reddit-name'  # -Username is optional
+```
+
+Requests then go through `oauth.reddit.com` with an application-only token (read-only, no account login).
+The client ID of an installed app is not a secret and is saved to `~/.psreddittui_auth.json`.
+You can use environment variables instead: `PSREDDITTUI_CLIENT_ID`, `PSREDDITTUI_USERNAME`, and
+`PSREDDITTUI_CLIENT_SECRET` (only for *script*/*web* apps; the secret is never written to disk).
+Run `Remove-RedditCredential` to go back to anonymous requests.
 
 ## Usage
 
@@ -152,11 +171,14 @@ Clear-PSRedditTUILog
 
 ## How It Works
 
-PSRedditTUI uses Reddit's JSON API by appending `.json` to Reddit URLs. This allows the module to fetch data without requiring authentication for public subreddits.
+PSRedditTUI uses Reddit's JSON API by appending `.json` to Reddit URLs, plus `raw_json=1` so titles and text arrive unescaped. Public subreddits work without authentication when Reddit allows it.
 
 Example:
 - URL: `https://www.reddit.com/r/powershell/top?t=month`
-- Becomes: `https://www.reddit.com/r/powershell/top.json?t=month`
+- Becomes: `https://www.reddit.com/r/powershell/top.json?t=month&raw_json=1`
+
+When a client ID is configured with `Set-RedditCredential`, the same request goes to
+`https://oauth.reddit.com/r/powershell/top?t=month&raw_json=1` with a cached bearer token.
 
 ## Limitations
 
@@ -168,11 +190,9 @@ Example:
 
 - **Dependency on Reddit's JSON URL Feature**: This module relies entirely on Reddit's undocumented feature of appending `.json` to URLs to fetch data. **If Reddit removes or changes this feature, the module will break.** This is an unofficial API endpoint not guaranteed by Reddit.
 
-- **No Authentication**: The module only accesses public subreddit data. Private subreddits, user-specific feeds (like your homepage), and authenticated actions (voting, posting, saving) are not supported.
+- **Read-Only Access**: Even with `Set-RedditCredential`, the module uses an application-only token. Private subreddits, user-specific feeds (like your homepage), and authenticated actions (voting, posting, saving) are not supported.
 
-- **No Pagination**: The module does not currently support loading more posts beyond the initial batch returned by Reddit. Future versions may add "load more" functionality.
-
-- **Rate Limiting**: Reddit may rate-limit requests. Excessive queries in a short time may result in temporary blocks. The module does not implement retry logic or rate limit handling.
+- **Rate Limiting**: Reddit may rate-limit requests. Excessive queries in a short time may result in temporary blocks. On HTTP 429 the module waits for `Retry-After` (capped at 10 seconds) and retries once.
 
 ### Terminal UI Limitations
 
@@ -227,6 +247,8 @@ When you launch PSRedditTUI for the first time, the favorites sidebar is automat
 | `Add-Favorite` | Add a subreddit to favorites |
 | `Remove-Favorite` | Remove a subreddit from favorites |
 | `Install-PSRedditTUITerminalGui` | Install Terminal.Gui and NStack.Core dependencies from NuGet |
+| `Set-RedditCredential` | Save a Reddit app client ID for OAuth requests |
+| `Remove-RedditCredential` | Remove the saved client ID and cached token |
 | `Get-PSRedditTUILog` | View log entries |
 | `Set-PSRedditTUILogLevel` | Set logging verbosity |
 | `Clear-PSRedditTUILog` | Clear the log file |

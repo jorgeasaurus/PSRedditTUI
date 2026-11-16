@@ -211,6 +211,10 @@ $script:AfterCursor = $null
 $script:LastSearchQuery = $null
 $script:LastSearchSubreddit = $null
 $script:LastSearchGlobal = $false
+$script:CurrentSubreddit = $null
+$script:AuthFile = Join-Path $HOME ".psreddittui_auth.json"
+$script:AccessToken = $null
+$script:AccessTokenExpiry = [datetime]::MinValue
 
 # Default subreddits to populate on first launch
 $script:DefaultFavorites = @(
@@ -231,12 +235,153 @@ Write-Log -Message "Favorites file: $script:FavoritesFile" -Level Debug
 
 #region Reddit API Functions
 
+function Get-RedditUserAgent {
+    <#
+    .SYNOPSIS
+        Builds a User-Agent in the format Reddit's API rules require: platform:app:version (contact)
+    #>
+    $version = $MyInvocation.MyCommand.Module.Version
+    $platform = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' }
+    $authConfig = Get-RedditAuthConfig
+    $contact = if ($authConfig -and $authConfig.Username) { "by /u/$($authConfig.Username)" } else { '+https://github.com/jorgeasaurus/PSRedditTUI' }
+    return "${platform}:PSRedditTUI:v$version ($contact)"
+}
+
+function Get-RedditAuthConfig {
+    <#
+    .SYNOPSIS
+        Returns the configured Reddit OAuth app settings, or $null when none are configured
+    .DESCRIPTION
+        Environment variables (PSREDDITTUI_CLIENT_ID, PSREDDITTUI_CLIENT_SECRET, PSREDDITTUI_USERNAME)
+        take precedence over the saved auth file written by Set-RedditCredential.
+    #>
+    $saved = $null
+    if (Test-Path $script:AuthFile) {
+        try {
+            $saved = Get-Content $script:AuthFile -Raw | ConvertFrom-Json
+        }
+        catch {
+            Write-Log -Message "Failed to read auth file: $script:AuthFile" -Level Warning -ErrorRecord $_
+        }
+    }
+
+    $clientId = if ($env:PSREDDITTUI_CLIENT_ID) { $env:PSREDDITTUI_CLIENT_ID } else { $saved.ClientId }
+    if (-not $clientId) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        ClientId     = $clientId
+        ClientSecret = $env:PSREDDITTUI_CLIENT_SECRET
+        Username     = if ($env:PSREDDITTUI_USERNAME) { $env:PSREDDITTUI_USERNAME } else { $saved.Username }
+    }
+}
+
+function Get-RedditAccessToken {
+    <#
+    .SYNOPSIS
+        Gets (and caches) an application-only OAuth token
+    .DESCRIPTION
+        Uses the installed_client grant when only a client ID is configured, or client_credentials
+        when a client secret is available. Deliberately bypasses Get-RedditData so the token never
+        reaches the response-preview debug logging.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        $Config
+    )
+
+    if ($script:AccessToken -and (Get-Date) -lt $script:AccessTokenExpiry) {
+        return $script:AccessToken
+    }
+
+    $basicAuth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Config.ClientId):$($Config.ClientSecret)"))
+    $body = if ($Config.ClientSecret) {
+        @{ grant_type = 'client_credentials' }
+    } else {
+        @{ grant_type = 'https://oauth.reddit.com/grants/installed_client'; device_id = 'DO_NOT_TRACK_THIS_DEVICE' }
+    }
+
+    Write-Log -Message "Requesting app-only OAuth token (grant: $($body.grant_type))" -Level Info
+
+    try {
+        $response = Invoke-RestMethod -Uri 'https://www.reddit.com/api/v1/access_token' -Method Post `
+            -Headers @{ Authorization = "Basic $basicAuth" } -Body $body -UserAgent (Get-RedditUserAgent) -SkipHeaderValidation
+    }
+    catch {
+        throw "Failed to get a Reddit OAuth token. Check the client ID passed to Set-RedditCredential. Details: $($_.Exception.Message)"
+    }
+
+    if (-not $response.access_token) {
+        throw "Reddit did not return an OAuth token (error: $($response.error)). Check the client ID passed to Set-RedditCredential."
+    }
+
+    $script:AccessToken = $response.access_token
+    $script:AccessTokenExpiry = (Get-Date).AddSeconds([int]$response.expires_in - 60)
+    Write-Log -Message "OAuth token acquired, expires in $($response.expires_in)s" -Level Info
+    return $script:AccessToken
+}
+
+function Set-RedditCredential {
+    <#
+    .SYNOPSIS
+        Saves the Reddit app client ID used for OAuth requests
+    .DESCRIPTION
+        Reddit blocks many unauthenticated requests. Create an "installed app" at
+        https://www.reddit.com/prefs/apps (the redirect URI can be http://localhost) and pass its
+        client ID here. Requests then go through oauth.reddit.com with an application-only token.
+
+        The client ID of an installed app is not a secret. For a "script" or "web" app, keep the
+        secret out of the file and set the PSREDDITTUI_CLIENT_SECRET environment variable instead.
+    .PARAMETER ClientId
+        The client ID shown under the app name on https://www.reddit.com/prefs/apps
+    .PARAMETER Username
+        Optional Reddit username, used in the User-Agent as Reddit's API rules ask
+    .EXAMPLE
+        Set-RedditCredential -ClientId 'aBcDeFgHiJkLmN'
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ClientId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Username
+    )
+
+    if ($PSCmdlet.ShouldProcess($script:AuthFile, 'Save Reddit client ID')) {
+        [PSCustomObject]@{ ClientId = $ClientId; Username = $Username } |
+            ConvertTo-Json | Set-Content -Path $script:AuthFile -Encoding utf8
+        $script:AccessToken = $null
+        $script:AccessTokenExpiry = [datetime]::MinValue
+        Write-Log -Message "Saved Reddit client ID to $script:AuthFile" -Level Info
+    }
+}
+
+function Remove-RedditCredential {
+    <#
+    .SYNOPSIS
+        Removes the saved Reddit client ID and clears the cached OAuth token
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    if ((Test-Path $script:AuthFile) -and $PSCmdlet.ShouldProcess($script:AuthFile, 'Remove saved Reddit client ID')) {
+        Remove-Item -Path $script:AuthFile -Force
+        Write-Log -Message "Removed auth file: $script:AuthFile" -Level Info
+    }
+    $script:AccessToken = $null
+    $script:AccessTokenExpiry = [datetime]::MinValue
+}
+
 function Get-RedditData {
     <#
     .SYNOPSIS
         Fetches Reddit data in JSON format
     .DESCRIPTION
-        Appends /.json to Reddit URLs and fetches the data
+        Appends .json and raw_json=1 to Reddit URLs and fetches the data. When a client ID is
+        configured (see Set-RedditCredential), the request goes to oauth.reddit.com with a bearer token.
     .PARAMETER Url
         The Reddit URL to fetch (without .json extension)
     .EXAMPLE
@@ -251,70 +396,80 @@ function Get-RedditData {
     $ProgressPreference = 'SilentlyContinue'
 
     try {
-        # Add .json to the URL path (before any query string)
-        if (-not ($Url -match '\.json')) {
-            # Parse URL to insert .json before query string
-            if ($Url -match '\?') {
-                # URL has query string - insert .json before it
-                $Url = $Url -replace '\?', '.json?'
-            } else {
-                # No query string - just append .json
-                $Url = $Url.TrimEnd('/') + '.json'
-            }
+        $headers = @{}
+        $authConfig = Get-RedditAuthConfig
+        if ($authConfig) {
+            $headers['Authorization'] = "bearer $(Get-RedditAccessToken -Config $authConfig)"
+            $Url = $Url -replace '^https://(www\.)?reddit\.com', 'https://oauth.reddit.com'
         }
 
-        Write-Log -Message "Fetching Reddit data from: $Url" -Level Debug
+        # Split off the query string so .json goes on the path and raw_json=1 on the query.
+        # raw_json=1 stops Reddit from HTML-escaping &, < and > in titles and bodies.
+        $path, $query = $Url -split '\?', 2
+        if (-not $authConfig -and $path -notmatch '\.json$') {
+            $path = $path.TrimEnd('/') + '.json'
+        }
+        $query = if ($query) { "$query&raw_json=1" } else { 'raw_json=1' }
+        $Url = "${path}?$query"
+
+        Write-Log -Message "Fetching Reddit data from: $Url (authenticated: $([bool]$authConfig))" -Level Debug
         Write-Verbose "Fetching data from: $Url"
 
-        # Use module version for User-Agent
-        $moduleVersion = $MyInvocation.MyCommand.Module.Version
-        $userAgent = "PSRedditTUI/$moduleVersion"
-
-        $startTime = Get-Date
-        $rawContent = $null
-        $statusCode = 200
-        $contentType = "application/json"
-
-        # Try Invoke-WebRequest first for full response details
-        try {
-            $webResponse = Invoke-WebRequest -Uri $Url -Method Get -UserAgent $userAgent
-            $duration = ((Get-Date) - $startTime).TotalMilliseconds
-
-            $statusCode = $webResponse.StatusCode
-            $contentType = $webResponse.Headers['Content-Type']
-            $rawContent = $webResponse.Content
-
-            Write-Log -Message "Reddit API response: Status=$statusCode, ContentType=$contentType, Size=$($rawContent.Length)bytes, Duration=${duration}ms" -Level Debug
-        }
-        catch [System.ArgumentOutOfRangeException] {
-            # Invoke-WebRequest fails with ArgumentOutOfRangeException on some Reddit responses
-            # This is a known PowerShell Core bug with large Unicode content
-            # Fallback to Invoke-RestMethod which handles these cases better
-            Write-Log -Message "Invoke-WebRequest failed with ArgumentOutOfRangeException, falling back to Invoke-RestMethod" -Level Debug
-
+        $userAgent = Get-RedditUserAgent
+        $attempt = 0
+        while ($true) {
+            $attempt++
+            $startTime = Get-Date
             try {
-                $restStartTime = Get-Date
-                $response = Invoke-RestMethod -Uri $Url -Method Get -UserAgent $userAgent
-                $duration = ((Get-Date) - $restStartTime).TotalMilliseconds
+                $webResponse = Invoke-WebRequest -Uri $Url -Method Get -UserAgent $userAgent -Headers $headers -SkipHeaderValidation -SkipHttpErrorCheck
+            }
+            catch [System.ArgumentOutOfRangeException] {
+                # Invoke-WebRequest fails with ArgumentOutOfRangeException on some Reddit responses
+                # This is a known PowerShell Core bug with large Unicode content
+                # Fallback to Invoke-RestMethod which handles these cases better
+                Write-Log -Message "Invoke-WebRequest failed with ArgumentOutOfRangeException, falling back to Invoke-RestMethod" -Level Debug
+                return Invoke-RestMethod -Uri $Url -Method Get -UserAgent $userAgent -Headers $headers -SkipHeaderValidation
+            }
 
-                Write-Log -Message "Reddit API response (via RestMethod): Status=200, Duration=${duration}ms" -Level Debug
-                Write-Log -Message "JSON parsed successfully (via RestMethod fallback)" -Level Debug
+            # Honor Retry-After once on rate limiting, capped so the UI doesn't hang for long
+            if ([int]$webResponse.StatusCode -eq 429 -and $attempt -lt 2) {
+                $retryAfter = 5
+                [int]::TryParse("$($webResponse.Headers['Retry-After'])", [ref]$retryAfter) | Out-Null
+                $retryAfter = [Math]::Min([Math]::Max($retryAfter, 1), 10)
+                Write-Log -Message "Rate limited (429), retrying in ${retryAfter}s" -Level Warning
+                Start-Sleep -Seconds $retryAfter
+                continue
+            }
+            break
+        }
 
-                # Log structure info
-                if ($response -is [array]) {
-                    Write-Log -Message "Response is array with $($response.Count) elements" -Level Debug
-                } elseif ($response.data) {
-                    $childCount = if ($response.data.children) { $response.data.children.Count } else { 0 }
-                    Write-Log -Message "Response has data property with $childCount children" -Level Debug
+        $duration = ((Get-Date) - $startTime).TotalMilliseconds
+        $statusCode = [int]$webResponse.StatusCode
+        $contentType = "$($webResponse.Headers['Content-Type'])"
+        $rawContent = $webResponse.Content
+
+        Write-Log -Message "Reddit API response: Status=$statusCode, ContentType=$contentType, Size=$($rawContent.Length)bytes, Duration=${duration}ms" -Level Debug
+
+        if ($statusCode -ge 400) {
+            $message = switch ($statusCode) {
+                401 {
+                    $script:AccessToken = $null
+                    'Reddit rejected the OAuth token (HTTP 401). Check the client ID passed to Set-RedditCredential.'
                 }
-
-                return $response
+                403 {
+                    if ($contentType -match 'json') {
+                        'Access denied (HTTP 403). The subreddit may be private or quarantined.'
+                    } elseif ($authConfig) {
+                        'Reddit blocked this request (HTTP 403) even with OAuth. Your network or IP may be blocked by Reddit.'
+                    } else {
+                        'Reddit blocked this unauthenticated request (HTTP 403). Create an installed app at https://www.reddit.com/prefs/apps, then run: Set-RedditCredential -ClientId <id>'
+                    }
+                }
+                404 { 'Not found (HTTP 404). The subreddit or post may not exist or may be banned.' }
+                429 { 'Reddit rate limit reached (HTTP 429). Wait a minute and try again.' }
+                default { "Reddit returned HTTP $statusCode." }
             }
-            catch {
-                Write-Log -Message "Invoke-RestMethod also failed for: $Url" -Level Error -ErrorRecord $_
-                Write-Error "Failed to fetch Reddit data: $_"
-                return $null
-            }
+            throw $message
         }
 
         # Log first portion of response for debugging (truncate if too long)
@@ -360,20 +515,8 @@ function Get-RedditData {
         }
     }
     catch {
-        $errorContext = "URL: $Url"
-
-        # Add HTTP response details if available
-        if ($_.Exception.Response) {
-            $errorContext += " | HTTP Status: $($_.Exception.Response.StatusCode) $($_.Exception.Response.StatusDescription)"
-        }
-
-        # Add specific error type information
-        if ($_.Exception -is [System.Net.WebException]) {
-            $errorContext += " | Network Error: $($_.Exception.Status)"
-        }
-
-        Write-Log -Message "Failed to fetch Reddit data - $errorContext" -Level Error -ErrorRecord $_
-        Write-Error "Failed to fetch Reddit data: $_"
+        Write-Log -Message "Failed to fetch Reddit data - URL: $Url" -Level Error -ErrorRecord $_
+        Write-Error "Failed to fetch Reddit data: $($_.Exception.Message)"
         return $null
     }
 }
@@ -444,21 +587,7 @@ function Get-RedditPosts {
         return $data.data.children | ForEach-Object {
             Write-Log -Message "Get-RedditPosts: post[$postIndex] title='$($_.data.title)' post_hint='$($_.data.post_hint)' is_video=$($_.data.is_video) subreddit=$($_.data.subreddit)" -Level Debug
             $postIndex++
-            [PSCustomObject]@{
-                Title = $_.data.title
-                Author = $_.data.author
-                Score = $_.data.score
-                Subreddit = $_.data.subreddit
-                Url = "https://www.reddit.com$($_.data.permalink)"
-                Permalink = $_.data.permalink
-                NumComments = $_.data.num_comments
-                Created = [DateTimeOffset]::FromUnixTimeSeconds($_.data.created_utc).LocalDateTime
-                SelfText = $_.data.selftext
-                IsLink = -not [string]::IsNullOrEmpty($_.data.url) -and $_.data.url -ne $_.data.permalink
-                LinkUrl = $_.data.url
-                PostHint = $_.data.post_hint
-                IsVideo = [bool]$_.data.is_video
-            }
+            ConvertTo-RedditPost -PostData $_.data
         }
     }
 
@@ -541,6 +670,7 @@ function Search-Reddit {
         [string]$Query,
 
         [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[a-zA-Z0-9_+\-]+$')]
         [string]$Subreddit,
 
         [Parameter(Mandatory = $false)]
@@ -557,14 +687,13 @@ function Search-Reddit {
 
     Write-Log -Message "Searching Reddit: '$Query' (subreddit: $Subreddit, sort: $Sort, time: $Time, after: $After)" -Level Info
 
-    # URL encode the query
-    $encodedQuery = [System.Web.HttpUtility]::UrlEncode($Query)
+    $encodedQuery = [uri]::EscapeDataString($Query)
 
-    # Build URL
+    # Build URL (Get-RedditData adds .json/raw_json and switches host when authenticated)
     if ($Subreddit) {
-        $url = "https://www.reddit.com/r/$Subreddit/search.json?q=$encodedQuery&restrict_sr=on&sort=$Sort&t=$Time"
+        $url = "https://www.reddit.com/r/$Subreddit/search?q=$encodedQuery&restrict_sr=on&sort=$Sort&t=$Time"
     } else {
-        $url = "https://www.reddit.com/search.json?q=$encodedQuery&sort=$Sort&t=$Time"
+        $url = "https://www.reddit.com/search?q=$encodedQuery&sort=$Sort&t=$Time"
     }
 
     # Append pagination cursor
@@ -573,54 +702,46 @@ function Search-Reddit {
         Write-Log -Message "Search-Reddit: appended pagination cursor '$After'" -Level Debug
     }
 
-    $ProgressPreference = 'SilentlyContinue'
+    Write-Log -Message "Search-Reddit: final URL = $url" -Level Debug
+    $response = Get-RedditData -Url $url
 
-    try {
-        Write-Log -Message "Search-Reddit: final URL = $url" -Level Debug
+    # Capture pagination cursor
+    $script:AfterCursor = if ($response -and $response.data) { $response.data.after } else { $null }
+    Write-Log -Message "Search-Reddit: response received, data null=$($null -eq $response), AfterCursor=$($script:AfterCursor)" -Level Debug
 
-        # Use module version for User-Agent
-        $moduleVersion = $MyInvocation.MyCommand.Module.Version
-        $userAgent = "PSRedditTUI/$moduleVersion"
-
-        $startTime = Get-Date
-        $response = Invoke-RestMethod -Uri $url -Method Get -UserAgent $userAgent
-        $duration = ((Get-Date) - $startTime).TotalMilliseconds
-
-        Write-Log -Message "Search completed in ${duration}ms" -Level Debug
-
-        # Capture pagination cursor
-        $script:AfterCursor = if ($response -and $response.data) { $response.data.after } else { $null }
-        Write-Log -Message "Search-Reddit: response received, data null=$($null -eq $response), AfterCursor=$($script:AfterCursor)" -Level Debug
-
-        if ($response -and $response.data -and $response.data.children) {
-            $resultCount = $response.data.children.Count
-            Write-Log -Message "Search-Reddit: returned $resultCount results (after cursor: $($script:AfterCursor))" -Level Info
-
-            return $response.data.children | ForEach-Object {
-                [PSCustomObject]@{
-                    Title = $_.data.title
-                    Author = $_.data.author
-                    Score = $_.data.score
-                    Subreddit = $_.data.subreddit
-                    Url = "https://www.reddit.com$($_.data.permalink)"
-                    Permalink = $_.data.permalink
-                    NumComments = $_.data.num_comments
-                    Created = [DateTimeOffset]::FromUnixTimeSeconds($_.data.created_utc).LocalDateTime
-                    SelfText = $_.data.selftext
-                    IsLink = -not [string]::IsNullOrEmpty($_.data.url) -and $_.data.url -ne $_.data.permalink
-                    LinkUrl = $_.data.url
-                    PostHint = $_.data.post_hint
-                    IsVideo = [bool]$_.data.is_video
-                }
-            }
-        }
-
-        return @()
+    if ($response -and $response.data -and $response.data.children) {
+        $resultCount = $response.data.children.Count
+        Write-Log -Message "Search-Reddit: returned $resultCount results (after cursor: $($script:AfterCursor))" -Level Info
+        return $response.data.children | ForEach-Object { ConvertTo-RedditPost -PostData $_.data }
     }
-    catch {
-        Write-Log -Message "Search failed for query: '$Query' (subreddit: $Subreddit)" -Level Error -ErrorRecord $_
-        Write-Error "Failed to search Reddit: $_"
-        return @()
+
+    return @()
+}
+
+function ConvertTo-RedditPost {
+    <#
+    .SYNOPSIS
+        Converts Reddit post (t3) data to a PowerShell object
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        $PostData
+    )
+
+    return [PSCustomObject]@{
+        Title = $PostData.title
+        Author = $PostData.author
+        Score = $PostData.score
+        Subreddit = $PostData.subreddit
+        Url = "https://www.reddit.com$($PostData.permalink)"
+        Permalink = $PostData.permalink
+        NumComments = $PostData.num_comments
+        Created = [DateTimeOffset]::FromUnixTimeSeconds($PostData.created_utc).LocalDateTime
+        SelfText = $PostData.selftext
+        IsLink = -not $PostData.is_self
+        LinkUrl = $PostData.url
+        PostHint = $PostData.post_hint
+        IsVideo = [bool]$PostData.is_video
     }
 }
 
@@ -1450,6 +1571,7 @@ function Show-RedditTUI {
 
             $script:IsSearchResults = $false
             $script:AfterCursor = $null
+            $script:CurrentSubreddit = $subreddit
             $sort = $script:CurrentSort
             $time = $script:CurrentTime
 
@@ -1583,6 +1705,10 @@ function Show-RedditTUI {
                     $subreddit = $subredditInput.Text.ToString().Trim()
                     $globalSearch = $searchGlobalCheck.Checked
                     Write-Log -Message "TUI: Search button clicked - query: '$query', global: $globalSearch" -Level Debug
+                    if (-not $globalSearch -and -not $subreddit) {
+                        [Terminal.Gui.MessageBox]::Query("Search", "Enter a subreddit or check 'All Reddit'", @("OK"))
+                        return
+                    }
                     & $searchPosts $query $subreddit $globalSearch
                 } else {
                     [Terminal.Gui.MessageBox]::Query("Search", "Please enter a search query", @("OK"))
@@ -1619,8 +1745,8 @@ function Show-RedditTUI {
                         $newPosts = Search-Reddit -Query $q -Subreddit $sub -After $cursor -ErrorAction Stop
                     }
                 } else {
-                    # Paginate subreddit posts
-                    $sub = $subredditInput.Text.ToString().Trim()
+                    # Paginate the subreddit that was loaded, not whatever is in the text box now
+                    $sub = $script:CurrentSubreddit
                     $sort = $script:CurrentSort
                     $time = $script:CurrentTime
                     Write-Log -Message "TUI: LoadMore: subreddit pagination - sub='$sub' sort=$sort time=$time" -Level Debug
@@ -1926,7 +2052,7 @@ function Install-PSRedditTUITerminalGui {
 
         # Check if already installed (skip if -Force)
         if (-not $Force) {
-            if ((Test-Path $terminalGuiDllPath) -and (Test-Path $nstackDllPath)) {
+            if ($terminalGuiDllPath -and (Test-Path $terminalGuiDllPath) -and (Test-Path $nstackDllPath)) {
                 Write-Log -Message "Terminal.Gui and NStack already installed" -Level Info
                 Write-Information "Terminal.Gui and NStack are already installed. Use -Force to reinstall." -InformationAction Continue
 
@@ -2107,5 +2233,7 @@ Export-ModuleMember -Function @(
     'Get-PSRedditTUILog',
     'Clear-PSRedditTUILog',
     'Set-PSRedditTUILogLevel',
-    'Install-PSRedditTUITerminalGui'
+    'Install-PSRedditTUITerminalGui',
+    'Set-RedditCredential',
+    'Remove-RedditCredential'
 )

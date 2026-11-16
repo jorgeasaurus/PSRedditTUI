@@ -39,7 +39,9 @@
         'Get-PSRedditTUILog',
         'Clear-PSRedditTUILog',
         'Set-PSRedditTUILogLevel',
-        'Install-PSRedditTUITerminalGui'
+        'Install-PSRedditTUITerminalGui',
+        'Set-RedditCredential',
+        'Remove-RedditCredential'
     )
     
     # Cmdlets to export from this module

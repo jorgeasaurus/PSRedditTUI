@@ -4,17 +4,68 @@
 .SYNOPSIS
     Pester tests for PSRedditTUI module
 .DESCRIPTION
-    Tests core functionality that doesn't require Terminal.Gui
+    Tests core functionality that doesn't require Terminal.Gui.
+    Network calls are mocked; favorites, auth and log files are redirected to TestDrive
+    so the user's real files under $HOME are never touched.
 #>
 
 BeforeAll {
     # Import the module (not dot-source) to get proper function scoping
     $modulePath = Join-Path -Path $PSScriptRoot -ChildPath '..\PSRedditTUI.psd1'
     Import-Module $modulePath -Force
+
+    # Keep real credentials in the environment from leaking into tests
+    $script:savedEnv = @{}
+    foreach ($name in 'PSREDDITTUI_CLIENT_ID', 'PSREDDITTUI_CLIENT_SECRET', 'PSREDDITTUI_USERNAME') {
+        $script:savedEnv[$name] = [Environment]::GetEnvironmentVariable($name)
+        [Environment]::SetEnvironmentVariable($name, $null)
+    }
+
+    # The module loaded the real favorites at import, so reset state as well as paths
+    InModuleScope PSRedditTUI -Parameters @{ Root = $TestDrive } {
+        param($Root)
+        $script:FavoritesFile = Join-Path $Root 'favorites.json'
+        $script:AuthFile = Join-Path $Root 'auth.json'
+        $script:LogFile = Join-Path $Root 'debug.log'
+        $script:Favorites = @()
+        $script:AccessToken = $null
+    }
+
+    function Get-FakeWebResponse {
+        param(
+            [int]$StatusCode = 200,
+            [string]$Content = '{}',
+            [string]$ContentType = 'application/json; charset=UTF-8',
+            [hashtable]$ExtraHeaders = @{}
+        )
+        $headers = @{ 'Content-Type' = $ContentType } + $ExtraHeaders
+        [PSCustomObject]@{ StatusCode = $StatusCode; Content = $Content; Headers = $headers }
+    }
+
+    $script:listingJson = @'
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_next",
+    "children": [
+      { "kind": "t3", "data": { "title": "Tips & tricks <2026>", "author": "alice", "score": 42, "subreddit": "PowerShell",
+        "permalink": "/r/PowerShell/comments/abc/tips/", "num_comments": 3, "created_utc": 1700000000.0,
+        "selftext": "body", "is_self": true, "url": "https://www.reddit.com/r/PowerShell/comments/abc/tips/",
+        "post_hint": "self", "is_video": false } },
+      { "kind": "t3", "data": { "title": "A link", "author": "bob", "score": 7, "subreddit": "PowerShell",
+        "permalink": "/r/PowerShell/comments/def/link/", "num_comments": 0, "created_utc": 1700000100,
+        "selftext": "", "is_self": false, "url": "https://example.com/article",
+        "post_hint": "link", "is_video": false } }
+    ]
+  }
+}
+'@
 }
 
 AfterAll {
-    # Clean up module
+    foreach ($name in $script:savedEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $script:savedEnv[$name])
+    }
     Remove-Module PSRedditTUI -Force -ErrorAction SilentlyContinue
 }
 
@@ -52,7 +103,9 @@ Describe 'PSRedditTUI Module' {
                 'Get-PSRedditTUILog',
                 'Clear-PSRedditTUILog',
                 'Set-PSRedditTUILogLevel',
-                'Install-PSRedditTUITerminalGui'
+                'Install-PSRedditTUITerminalGui',
+                'Set-RedditCredential',
+                'Remove-RedditCredential'
             )
             foreach ($func in $expectedFunctions) {
                 $module.ExportedFunctions.Keys | Should -Contain $func
@@ -61,42 +114,38 @@ Describe 'PSRedditTUI Module' {
     }
 
     Context 'Favorites Management' {
-        BeforeAll {
-            # Save current favorites
-            $script:savedFavorites = Get-Favorites
+        It 'Get-Favorites should create defaults on first launch' {
+            $favorites = Get-Favorites
+            $favorites | Should -Contain 'powershell'
+            Join-Path $TestDrive 'favorites.json' | Should -Exist
         }
 
-        AfterAll {
-            # Note: We don't restore because tests may have modified the file
-            # This is acceptable for integration tests
+        It 'Add-Favorite should normalize case and strip the r/ prefix' {
+            Add-Favorite -Subreddit 'r/PrefixTest999'
+            $favorites = Get-Favorites
+            $favorites | Should -Contain 'prefixtest999'
         }
 
-        It 'Get-Favorites should not throw' {
-            { Get-Favorites } | Should -Not -Throw
-        }
-
-        It 'Add-Favorite should accept a subreddit name' {
-            { Add-Favorite -Subreddit 'testsubreddit123' } | Should -Not -Throw
-        }
-
-        It 'Add-Favorite should work with r/ prefix' {
-            { Add-Favorite -Subreddit 'r/prefixtest999' } | Should -Not -Throw
+        It 'Add-Favorite should report duplicates' {
+            Add-Favorite -Subreddit 'dupetest'
+            (Add-Favorite -Subreddit 'DupeTest' -PassThru).Action | Should -Be 'AlreadyExists'
         }
 
         It 'Remove-Favorite should remove a subreddit' {
             Add-Favorite -Subreddit 'toberemoved789'
-            $before = Get-Favorites
             Remove-Favorite -Subreddit 'toberemoved789'
-            $after = Get-Favorites
-            $after | Should -Not -Contain 'toberemoved789'
+            $favorites = Get-Favorites
+            $favorites | Should -Not -Contain 'toberemoved789'
+        }
+
+        It 'Should never write to the real favorites file' {
+            InModuleScope PSRedditTUI { $script:FavoritesFile } | Should -BeLike "$TestDrive*"
         }
     }
 
     Context 'Logging Functions' {
         It 'Get-PSRedditTUILog should return log entries' {
-            $result = Get-PSRedditTUILog -Tail 5
-            # May be empty or contain entries
-            { $result } | Should -Not -Throw
+            { Get-PSRedditTUILog -Tail 5 } | Should -Not -Throw
         }
 
         It 'Set-PSRedditTUILogLevel should accept valid levels' {
@@ -104,6 +153,7 @@ Describe 'PSRedditTUI Module' {
             { Set-PSRedditTUILogLevel -Level 'Info' } | Should -Not -Throw
             { Set-PSRedditTUILogLevel -Level 'Warning' } | Should -Not -Throw
             { Set-PSRedditTUILogLevel -Level 'Error' } | Should -Not -Throw
+            Set-PSRedditTUILogLevel -Level 'Debug'
         }
 
         It 'Clear-PSRedditTUILog should not throw' {
@@ -111,48 +161,208 @@ Describe 'PSRedditTUI Module' {
         }
     }
 
-    Context 'URL Construction' {
-        It 'Should build correct subreddit URL' {
-            # Test the URL pattern used internally
-            $subreddit = 'powershell'
-            $sort = 'hot'
-            $url = "https://www.reddit.com/r/$subreddit/$sort"
-            $url | Should -Be 'https://www.reddit.com/r/powershell/hot'
+    Context 'Get-RedditData (unauthenticated)' {
+        BeforeEach {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
         }
 
-        It 'Should build correct URL with time filter' {
-            $subreddit = 'sysadmin'
-            $sort = 'top'
-            $time = 'month'
-            $url = "https://www.reddit.com/r/$subreddit/$sort"
-            if ($sort -eq 'top') {
-                $url += "?t=$time"
+        It 'Should append .json and raw_json=1 to a plain URL' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $Uri -eq 'https://www.reddit.com/r/powershell/hot.json?raw_json=1'
             }
-            $url | Should -Be 'https://www.reddit.com/r/sysadmin/top?t=month'
         }
 
-        It 'Should correctly insert .json before query string' {
-            $url = 'https://www.reddit.com/r/test/top?t=month'
-            $result = $url -replace '\?', '.json?'
-            $result | Should -Be 'https://www.reddit.com/r/test/top.json?t=month'
+        It 'Should insert .json before an existing query string' {
+            Get-RedditData -Url 'https://www.reddit.com/r/test/top?t=month' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $Uri -eq 'https://www.reddit.com/r/test/top.json?t=month&raw_json=1'
+            }
+        }
+
+        It 'Should send a User-Agent in platform:app:version format' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $UserAgent -match '^(windows|macos|linux):PSRedditTUI:v\d+\.\d+\.\d+ \(.+\)$'
+            }
+        }
+
+        It 'Should explain how to fix an HTML 403 block' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+            }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } |
+                Should -Throw '*Set-RedditCredential*'
+        }
+
+        It 'Should report a JSON 403 as a private subreddit' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '{"reason":"private"}'
+            }
+            { Get-RedditData -Url 'https://www.reddit.com/r/secret/hot' -ErrorAction Stop } |
+                Should -Throw '*private*'
+        }
+
+        It 'Should retry once after a 429' {
+            $state = @{ Calls = 0 }
+            Mock -ModuleName PSRedditTUI Start-Sleep { }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                $state.Calls++
+                if ($state.Calls -eq 1) {
+                    Get-FakeWebResponse -StatusCode 429 -Content '{}' -ExtraHeaders @{ 'Retry-After' = '2' }
+                } else {
+                    Get-FakeWebResponse -Content $script:listingJson
+                }
+            }
+            $result = Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot'
+            $result.data.after | Should -Be 't3_next'
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 2 -Exactly
+            Should -Invoke -ModuleName PSRedditTUI Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 2 }
+        }
+        It 'Should wait 5 seconds when a 429 has no Retry-After header' {
+            $state = @{ Calls = 0 }
+            Mock -ModuleName PSRedditTUI Start-Sleep { }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                $state.Calls++
+                if ($state.Calls -eq 1) { Get-FakeWebResponse -StatusCode 429 -Content '{}' }
+                else { Get-FakeWebResponse -Content $script:listingJson }
+            }
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 5 }
+        }
+
+        It 'Should give up after a second 429' {
+            Mock -ModuleName PSRedditTUI Start-Sleep { }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -StatusCode 429 -Content '{}' }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*429*'
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 2 -Exactly
         }
     }
 
-    Context 'API Functions' {
-        It 'Get-RedditData should exist and be callable' {
-            Get-Command -Name Get-RedditData -Module PSRedditTUI | Should -Not -BeNullOrEmpty
+    Context 'Get-RedditData (OAuth)' {
+        BeforeAll {
+            Set-RedditCredential -ClientId 'test-client-id' -Username 'tester'
         }
 
-        It 'Get-RedditPosts should exist and be callable' {
-            Get-Command -Name Get-RedditPosts -Module PSRedditTUI | Should -Not -BeNullOrEmpty
+        AfterAll {
+            Remove-RedditCredential
         }
 
-        It 'Get-RedditComments should exist and be callable' {
-            Get-Command -Name Get-RedditComments -Module PSRedditTUI | Should -Not -BeNullOrEmpty
+        BeforeEach {
+            InModuleScope PSRedditTUI { $script:AccessToken = $null }
+            Mock -ModuleName PSRedditTUI Invoke-RestMethod {
+                [PSCustomObject]@{ access_token = 'tok123'; expires_in = 86400 }
+            } -ParameterFilter { $Uri -like '*api/v1/access_token' }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
         }
 
-        It 'Search-Reddit should exist and be callable' {
-            Get-Command -Name Search-Reddit -Module PSRedditTUI | Should -Not -BeNullOrEmpty
+        It 'Should save the client ID to the redirected auth file' {
+            Join-Path $TestDrive 'auth.json' | Should -Exist
+        }
+
+        It 'Should call oauth.reddit.com with a bearer token and no .json suffix' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $Uri -eq 'https://oauth.reddit.com/r/powershell/hot?raw_json=1' -and
+                $Headers['Authorization'] -eq 'bearer tok123'
+            }
+        }
+
+        It 'Should use the installed_client grant when no secret is set' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-RestMethod -Times 1 -ParameterFilter {
+                $Body.grant_type -eq 'https://oauth.reddit.com/grants/installed_client' -and
+                $Body.device_id -eq 'DO_NOT_TRACK_THIS_DEVICE'
+            }
+        }
+
+        It 'Should cache the token across requests' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/new' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+                $Uri -like '*api/v1/access_token'
+            }
+        }
+
+        It 'Should drop the cached token after a 401 so the next request refetches' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -StatusCode 401 -Content '{}' }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*401*'
+            InModuleScope PSRedditTUI { $script:AccessToken } | Should -BeNullOrEmpty
+
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-RestMethod -Times 2 -Exactly -ParameterFilter {
+                $Uri -like '*api/v1/access_token'
+            }
+        }
+
+        It 'Should not write the bearer token to the log when a request fails' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                $request = [System.Net.Http.HttpRequestMessage]::new('GET', 'https://oauth.reddit.com/r/powershell/hot')
+                $request.Headers.TryAddWithoutValidation('Authorization', 'bearer tok123') | Out-Null
+                throw [System.Management.Automation.ErrorRecord]::new(
+                    [System.Net.Http.HttpRequestException]::new('connection failed'), 'ConnectionFailed', 'ConnectionError', $request)
+            }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*connection failed*'
+            $log = Get-Content (Join-Path $TestDrive 'debug.log') -Raw
+            $log | Should -Match 'Target Object: GET https://oauth\.reddit\.com/r/powershell/hot'
+            $log | Should -Not -Match 'tok123'
+        }
+
+        It 'Should include the username in the User-Agent' {
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $UserAgent -like '*(by /u/tester)'
+            }
+        }
+    }
+
+    Context 'Post mapping' {
+        BeforeEach {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
+        }
+
+        It 'Get-RedditPosts should map posts and capture the pagination cursor' {
+            $posts = @(Get-RedditPosts -Subreddit 'powershell')
+            $posts.Count | Should -Be 2
+            $posts[0].Title | Should -Be 'Tips & tricks <2026>'
+            InModuleScope PSRedditTUI { $script:AfterCursor } | Should -Be 't3_next'
+        }
+
+        It 'Should treat self posts as non-links and link posts as links' {
+            $posts = @(Get-RedditPosts -Subreddit 'powershell')
+            $posts[0].IsLink | Should -BeFalse
+            $posts[1].IsLink | Should -BeTrue
+            $posts[1].LinkUrl | Should -Be 'https://example.com/article'
+        }
+
+        It 'Search-Reddit should go through Get-RedditData with an encoded query' {
+            $posts = @(Search-Reddit -Query 'a&b c' -Subreddit 'powershell')
+            $posts.Count | Should -Be 2
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
+                $Uri -eq 'https://www.reddit.com/r/powershell/search.json?q=a%26b%20c&restrict_sr=on&sort=relevance&t=all&raw_json=1'
+            }
+        }
+
+        It 'Should surface the blocked-request message to callers that use -ErrorAction Stop (as the TUI does)' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+            }
+            { Get-RedditPosts -Subreddit 'powershell' -ErrorAction Stop } | Should -Throw '*Set-RedditCredential*'
+            { Search-Reddit -Query 'x' -Subreddit 'powershell' -ErrorAction Stop } | Should -Throw '*Set-RedditCredential*'
+        }
+
+        It 'Should write the error and return no posts for callers that keep the default error action' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+            }
+            $posts = @(Search-Reddit -Query 'x' -ErrorVariable searchErrors -ErrorAction SilentlyContinue)
+            $posts.Count | Should -Be 0
+            "$searchErrors" | Should -BeLike '*Set-RedditCredential*'
+        }
+
+        It 'Search-Reddit should reject an invalid subreddit name' {
+            { Search-Reddit -Query 'x' -Subreddit '../evil' } | Should -Throw
         }
     }
 }

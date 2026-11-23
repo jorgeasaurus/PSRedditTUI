@@ -29,10 +29,9 @@ BeforeAll {
         $script:LogFile = Join-Path $Root 'debug.log'
         $script:Favorites = @()
         $script:AccessToken = $null
-        $script:AccessTokenExpiry = [datetime]::MinValue
     }
 
-    function New-FakeWebResponse {
+    function Get-FakeWebResponse {
         param(
             [int]$StatusCode = 200,
             [string]$Content = '{}',
@@ -164,7 +163,7 @@ Describe 'PSRedditTUI Module' {
 
     Context 'Get-RedditData (unauthenticated)' {
         BeforeEach {
-            Mock -ModuleName PSRedditTUI Invoke-WebRequest { New-FakeWebResponse -Content $script:listingJson }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
         }
 
         It 'Should append .json and raw_json=1 to a plain URL' {
@@ -190,7 +189,7 @@ Describe 'PSRedditTUI Module' {
 
         It 'Should explain how to fix an HTML 403 block' {
             Mock -ModuleName PSRedditTUI Invoke-WebRequest {
-                New-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
             }
             { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } |
                 Should -Throw '*Set-RedditCredential*'
@@ -198,7 +197,7 @@ Describe 'PSRedditTUI Module' {
 
         It 'Should report a JSON 403 as a private subreddit' {
             Mock -ModuleName PSRedditTUI Invoke-WebRequest {
-                New-FakeWebResponse -StatusCode 403 -Content '{"reason":"private"}'
+                Get-FakeWebResponse -StatusCode 403 -Content '{"reason":"private"}'
             }
             { Get-RedditData -Url 'https://www.reddit.com/r/secret/hot' -ErrorAction Stop } |
                 Should -Throw '*private*'
@@ -210,15 +209,33 @@ Describe 'PSRedditTUI Module' {
             Mock -ModuleName PSRedditTUI Invoke-WebRequest {
                 $state.Calls++
                 if ($state.Calls -eq 1) {
-                    New-FakeWebResponse -StatusCode 429 -Content '{}' -ExtraHeaders @{ 'Retry-After' = '2' }
+                    Get-FakeWebResponse -StatusCode 429 -Content '{}' -ExtraHeaders @{ 'Retry-After' = '2' }
                 } else {
-                    New-FakeWebResponse -Content $script:listingJson
+                    Get-FakeWebResponse -Content $script:listingJson
                 }
             }
             $result = Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot'
             $result.data.after | Should -Be 't3_next'
             Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 2 -Exactly
             Should -Invoke -ModuleName PSRedditTUI Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 2 }
+        }
+        It 'Should wait 5 seconds when a 429 has no Retry-After header' {
+            $state = @{ Calls = 0 }
+            Mock -ModuleName PSRedditTUI Start-Sleep { }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                $state.Calls++
+                if ($state.Calls -eq 1) { Get-FakeWebResponse -StatusCode 429 -Content '{}' }
+                else { Get-FakeWebResponse -Content $script:listingJson }
+            }
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 5 }
+        }
+
+        It 'Should give up after a second 429' {
+            Mock -ModuleName PSRedditTUI Start-Sleep { }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -StatusCode 429 -Content '{}' }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*429*'
+            Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 2 -Exactly
         }
     }
 
@@ -236,7 +253,7 @@ Describe 'PSRedditTUI Module' {
             Mock -ModuleName PSRedditTUI Invoke-RestMethod {
                 [PSCustomObject]@{ access_token = 'tok123'; expires_in = 86400 }
             } -ParameterFilter { $Uri -like '*api/v1/access_token' }
-            Mock -ModuleName PSRedditTUI Invoke-WebRequest { New-FakeWebResponse -Content $script:listingJson }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
         }
 
         It 'Should save the client ID to the redirected auth file' {
@@ -267,6 +284,31 @@ Describe 'PSRedditTUI Module' {
             }
         }
 
+        It 'Should drop the cached token after a 401 so the next request refetches' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -StatusCode 401 -Content '{}' }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*401*'
+            InModuleScope PSRedditTUI { $script:AccessToken } | Should -BeNullOrEmpty
+
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
+            Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
+            Should -Invoke -ModuleName PSRedditTUI Invoke-RestMethod -Times 2 -Exactly -ParameterFilter {
+                $Uri -like '*api/v1/access_token'
+            }
+        }
+
+        It 'Should not write the bearer token to the log when a request fails' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                $request = [System.Net.Http.HttpRequestMessage]::new('GET', 'https://oauth.reddit.com/r/powershell/hot')
+                $request.Headers.TryAddWithoutValidation('Authorization', 'bearer tok123') | Out-Null
+                throw [System.Management.Automation.ErrorRecord]::new(
+                    [System.Net.Http.HttpRequestException]::new('connection failed'), 'ConnectionFailed', 'ConnectionError', $request)
+            }
+            { Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' -ErrorAction Stop } | Should -Throw '*connection failed*'
+            $log = Get-Content (Join-Path $TestDrive 'debug.log') -Raw
+            $log | Should -Match 'Target Object: GET https://oauth\.reddit\.com/r/powershell/hot'
+            $log | Should -Not -Match 'tok123'
+        }
+
         It 'Should include the username in the User-Agent' {
             Get-RedditData -Url 'https://www.reddit.com/r/powershell/hot' | Out-Null
             Should -Invoke -ModuleName PSRedditTUI Invoke-WebRequest -Times 1 -ParameterFilter {
@@ -277,7 +319,7 @@ Describe 'PSRedditTUI Module' {
 
     Context 'Post mapping' {
         BeforeEach {
-            Mock -ModuleName PSRedditTUI Invoke-WebRequest { New-FakeWebResponse -Content $script:listingJson }
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest { Get-FakeWebResponse -Content $script:listingJson }
         }
 
         It 'Get-RedditPosts should map posts and capture the pagination cursor' {

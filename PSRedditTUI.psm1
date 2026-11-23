@@ -71,7 +71,13 @@ function Write-Log {
         $logEntry += "`n  Error Category: $($ErrorRecord.CategoryInfo.Category)"
         $logEntry += "`n  Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
         $logEntry += "`n  Error Type: $($ErrorRecord.Exception.GetType().FullName)"
-        $logEntry += "`n  Target Object: $($ErrorRecord.TargetObject)"
+        # A failed web request's TargetObject is the HttpRequestMessage, whose ToString()
+        # includes headers such as the OAuth bearer token - log only method and URI
+        $targetObject = $ErrorRecord.TargetObject
+        if ($targetObject -is [System.Net.Http.HttpRequestMessage]) {
+            $targetObject = "$($targetObject.Method) $($targetObject.RequestUri)"
+        }
+        $logEntry += "`n  Target Object: $targetObject"
 
         # Add inner exception details if present
         if ($ErrorRecord.Exception.InnerException) {
@@ -213,8 +219,7 @@ $script:LastSearchSubreddit = $null
 $script:LastSearchGlobal = $false
 $script:CurrentSubreddit = $null
 $script:AuthFile = Join-Path $HOME ".psreddittui_auth.json"
-$script:AccessToken = $null
-$script:AccessTokenExpiry = [datetime]::MinValue
+$script:AccessToken = $null  # @{ Value; ExpiresAt } once acquired
 
 # Default subreddits to populate on first launch
 $script:DefaultFavorites = @(
@@ -240,10 +245,14 @@ function Get-RedditUserAgent {
     .SYNOPSIS
         Builds a User-Agent in the format Reddit's API rules require: platform:app:version (contact)
     #>
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Username
+    )
+
     $version = $MyInvocation.MyCommand.Module.Version
     $platform = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' }
-    $authConfig = Get-RedditAuthConfig
-    $contact = if ($authConfig -and $authConfig.Username) { "by /u/$($authConfig.Username)" } else { '+https://github.com/jorgeasaurus/PSRedditTUI' }
+    $contact = if ($Username) { "by /u/$Username" } else { '+https://github.com/jorgeasaurus/PSRedditTUI' }
     return "${platform}:PSRedditTUI:v$version ($contact)"
 }
 
@@ -291,8 +300,8 @@ function Get-RedditAccessToken {
         $Config
     )
 
-    if ($script:AccessToken -and (Get-Date) -lt $script:AccessTokenExpiry) {
-        return $script:AccessToken
+    if ($script:AccessToken -and (Get-Date) -lt $script:AccessToken.ExpiresAt) {
+        return $script:AccessToken.Value
     }
 
     $basicAuth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Config.ClientId):$($Config.ClientSecret)"))
@@ -306,7 +315,7 @@ function Get-RedditAccessToken {
 
     try {
         $response = Invoke-RestMethod -Uri 'https://www.reddit.com/api/v1/access_token' -Method Post `
-            -Headers @{ Authorization = "Basic $basicAuth" } -Body $body -UserAgent (Get-RedditUserAgent) -SkipHeaderValidation
+            -Headers @{ Authorization = "Basic $basicAuth" } -Body $body -UserAgent (Get-RedditUserAgent -Username $Config.Username) -SkipHeaderValidation
     }
     catch {
         throw "Failed to get a Reddit OAuth token. Check the client ID passed to Set-RedditCredential. Details: $($_.Exception.Message)"
@@ -316,10 +325,12 @@ function Get-RedditAccessToken {
         throw "Reddit did not return an OAuth token (error: $($response.error)). Check the client ID passed to Set-RedditCredential."
     }
 
-    $script:AccessToken = $response.access_token
-    $script:AccessTokenExpiry = (Get-Date).AddSeconds([int]$response.expires_in - 60)
+    $script:AccessToken = @{
+        Value     = $response.access_token
+        ExpiresAt = (Get-Date).AddSeconds([int]$response.expires_in - 60)
+    }
     Write-Log -Message "OAuth token acquired, expires in $($response.expires_in)s" -Level Info
-    return $script:AccessToken
+    return $script:AccessToken.Value
 }
 
 function Set-RedditCredential {
@@ -354,7 +365,6 @@ function Set-RedditCredential {
         [PSCustomObject]@{ ClientId = $ClientId; Username = $Username } |
             ConvertTo-Json | Set-Content -Path $script:AuthFile -Encoding utf8
         $script:AccessToken = $null
-        $script:AccessTokenExpiry = [datetime]::MinValue
         Write-Log -Message "Saved Reddit client ID to $script:AuthFile" -Level Info
     }
 }
@@ -372,7 +382,6 @@ function Remove-RedditCredential {
         Write-Log -Message "Removed auth file: $script:AuthFile" -Level Info
     }
     $script:AccessToken = $null
-    $script:AccessTokenExpiry = [datetime]::MinValue
 }
 
 function Get-RedditData {
@@ -415,10 +424,8 @@ function Get-RedditData {
         Write-Log -Message "Fetching Reddit data from: $Url (authenticated: $([bool]$authConfig))" -Level Debug
         Write-Verbose "Fetching data from: $Url"
 
-        $userAgent = Get-RedditUserAgent
-        $attempt = 0
-        while ($true) {
-            $attempt++
+        $userAgent = Get-RedditUserAgent -Username $authConfig.Username
+        foreach ($attempt in 1..2) {
             $startTime = Get-Date
             try {
                 $webResponse = Invoke-WebRequest -Uri $Url -Method Get -UserAgent $userAgent -Headers $headers -SkipHeaderValidation -SkipHttpErrorCheck
@@ -432,9 +439,9 @@ function Get-RedditData {
             }
 
             # Honor Retry-After once on rate limiting, capped so the UI doesn't hang for long
-            if ([int]$webResponse.StatusCode -eq 429 -and $attempt -lt 2) {
-                $retryAfter = 5
-                [int]::TryParse("$($webResponse.Headers['Retry-After'])", [ref]$retryAfter) | Out-Null
+            if ([int]$webResponse.StatusCode -eq 429 -and $attempt -eq 1) {
+                $retryAfter = "$($webResponse.Headers['Retry-After'])" -as [int]
+                if (-not $retryAfter) { $retryAfter = 5 }
                 $retryAfter = [Math]::Min([Math]::Max($retryAfter, 1), 10)
                 Write-Log -Message "Rate limited (429), retrying in ${retryAfter}s" -Level Warning
                 Start-Sleep -Seconds $retryAfter

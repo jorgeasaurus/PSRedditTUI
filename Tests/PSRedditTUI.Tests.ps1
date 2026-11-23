@@ -344,6 +344,23 @@ Describe 'PSRedditTUI Module' {
             }
         }
 
+        It 'Should surface the blocked-request message to callers that use -ErrorAction Stop (as the TUI does)' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+            }
+            { Get-RedditPosts -Subreddit 'powershell' -ErrorAction Stop } | Should -Throw '*Set-RedditCredential*'
+            { Search-Reddit -Query 'x' -Subreddit 'powershell' -ErrorAction Stop } | Should -Throw '*Set-RedditCredential*'
+        }
+
+        It 'Should write the error and return no posts for callers that keep the default error action' {
+            Mock -ModuleName PSRedditTUI Invoke-WebRequest {
+                Get-FakeWebResponse -StatusCode 403 -Content '<html>blocked</html>' -ContentType 'text/html'
+            }
+            $posts = @(Search-Reddit -Query 'x' -ErrorVariable searchErrors -ErrorAction SilentlyContinue)
+            $posts.Count | Should -Be 0
+            "$searchErrors" | Should -BeLike '*Set-RedditCredential*'
+        }
+
         It 'Search-Reddit should reject an invalid subreddit name' {
             { Search-Reddit -Query 'x' -Subreddit '../evil' } | Should -Throw
         }
